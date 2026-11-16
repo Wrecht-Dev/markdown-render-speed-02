@@ -1083,6 +1083,23 @@ const EMAIL_AUTOLINK_RE = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Z
 // marked's link label matching never forms a link when the label
 // contains a code span whose content itself contains a backtick and
 // further label text follows that span
+// true when a text fragment contains a backtick run that no run of the
+// same length closes later in the fragment (CommonMark span pairing)
+function unclosedTickRun(s) {
+  const open = [];
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === '\\') { i += 2; continue; }
+    if (s[i] === '`') {
+      let run = 0; while (s[i + run] === '`') run++;
+      const at = open.lastIndexOf(run);
+      if (at !== -1) open.length = at; else open.push(run);
+      i += run;
+    } else i++;
+  }
+  return open.length > 0;
+}
+
 function labelCodeSpanBlocked(s) {
   let i = 0;
   while (i < s.length) {
@@ -1185,6 +1202,10 @@ function parseInline(text, refs) {
   const delims = []; // {node, char, len, canOpen, canClose}
   const brackets = []; // {nodeIndex, isImage, inactive, textStartNode}
   const failedLabels = []; // node ranges of labels whose link failed
+  // marked's lexer stays in a state where emphasis does not form after
+  // a link whose label holds a backtick run that never closes inside
+  // the label, until a link with a bracket-free label restores it
+  let poison = false;
   let buf = '';
   let i = 0;
   const n = text.length;
@@ -1350,8 +1371,14 @@ function parseInline(text, refs) {
       if (opener.inactive) { brackets.pop(); buf += ']'; i++; continue; }
       const link = tryParseLinkAt(text, i, opener, refs, nodes);
       if (link && !labelCodeSpanBlocked(text.slice(opener.srcIndex + (opener.isImage ? 2 : 1), i))) {
+        const labelSrc = text.slice(opener.srcIndex + (opener.isImage ? 2 : 1), i);
+        if (unclosedTickRun(labelSrc)) poison = true;
+        else if (!labelSrc.includes('[')) poison = false;
         // remove the '[' text node at opener.nodeIndex: nodes after it are children
         const children = stripAutoLinks(nodes.splice(opener.nodeIndex + 1));
+        // a label is lexed on its own: the post-bad-label state does
+        // not reach the delimiters inside it
+        for (const ch of children) if (ch.kind === 'delim') ch.poisoned = false;
         nodes.pop(); // the '[' or '![' text node
         const node = { kind: opener.isImage ? 'image' : 'link', href: link.href, title: link.title, children };
         nodes.push(node);
@@ -1384,7 +1411,7 @@ function parseInline(text, refs) {
         canClose = rightFlank && (!leftFlank || isPunct(afterCh));
       } else { canOpen = leftFlank; canClose = rightFlank; }
       flushBuf();
-      const node = { kind: 'delim', char: c, len: run, canOpen, canClose };
+      const node = { kind: 'delim', char: c, len: run, canOpen, canClose, poisoned: poison };
       nodes.push(node);
       delims.push({ node, char: c, len: run, canOpen, canClose });
       i += run; continue;
@@ -1466,7 +1493,7 @@ function parseInline(text, refs) {
 function processAllEmphasis(nodes, failedLabels) {
   const delims = [];
   for (const nd of nodes) {
-    if (nd.kind === 'delim') delims.push({ node: nd, char: nd.char, canOpen: nd.canOpen, canClose: nd.canClose, olen: nd.len });
+    if (nd.kind === 'delim') delims.push({ node: nd, char: nd.char, canOpen: nd.canOpen, canClose: nd.canClose, olen: nd.len, poisoned: nd.poisoned });
   }
   if (delims.length) processEmphasis(nodes, delims, null, failedLabels);
   // settle absorb marks: a leftover closing marker that is still in
@@ -1595,6 +1622,9 @@ function processEmphasis(nodes, delims, stackBottom, failedLabels) {
         // pairs rejected by the span rule stay rejected in later passes
         // over child node lists
         if (closer.node._blk && closer.node._blk.has(cand.node)) { oi--; continue; }
+        // delimiters scanned while the lexer was in the post-bad-label
+        // state do not pair with each other
+        if (cand.poisoned && closer.poisoned) { oi--; continue; }
         // inside a failed link label, marked does not form an emphasis
         // pair whose span contains a code span with a backtick in it
         if (failedLabels && failedLabels.length) {
