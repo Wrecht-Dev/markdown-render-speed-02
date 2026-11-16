@@ -36,7 +36,7 @@ function normLabel(s) {
 const TAG_RE = /^<(?:([a-zA-Z][a-zA-Z0-9-]*)(?:\s+[a-zA-Z_:][a-zA-Z0-9_.:-]*(?:\s*=\s*(?:[^"'=<>`\s]+|'[^']*'|"[^"]*"))?)*\s*\/?>|(\/[a-zA-Z][a-zA-Z0-9-]*)\s*>|!--(?:-?>|(?:[^-]|-(?!->))*-->)|!\?(?:[^?]|\?(?!>))*\?>|!\[CDATA\[(?:[^\]]|\](?!\]>))*\]\]>|!([a-zA-Z]+)(?:[^>]*)>|\?(?:[^?]|\?(?!>))*\?>)/;
 const SCHEME_AUTOLINK_RE = /^<([a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^<>\s]*)>/;
 const EMAIL_AUTOLINK_RE = /^<([a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+)>/;
-const BARE_URL_RE = /^(?:https?:\/\/|www\.)[^\s<>\[\]]*/i;
+const BARE_URL_RE = /^(?:https?:\/\/|www\.)[^\s<>]*/i;
 const BARE_EMAIL_RE = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9_-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9_-]{0,61}[a-zA-Z0-9])?)+/;
 
 // Find the index just past the bracket matching src[start] === '['.
@@ -399,7 +399,15 @@ function parseInline(src, st) {
           m = BARE_URL_RE.exec(rest);
           if (m) {
             let cand = m[0];
-            // cap at link-forming '[' (BARE_URL_RE already excludes brackets)
+            // the match ends before the first '(' whose group never closes
+            {
+              let depth = 0, cut = -1;
+              for (let k = 0; k < cand.length; k++) {
+                if (cand[k] === '(') { if (depth === 0 && cut < 0) cut = k; depth++; }
+                else if (cand[k] === ')') { if (depth > 0) { depth--; if (depth === 0) cut = -1; } }
+              }
+              if (cut >= 0) cand = cand.slice(0, cut);
+            }
             cand = trimAutolink(cand);
             if (cand.length >= (/^www\./.test(cand) ? 5 : 8)) { text = cand; href = /^www\./.test(cand) ? 'http://' + cand : cand; }
             else m = null;
