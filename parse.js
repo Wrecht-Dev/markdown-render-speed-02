@@ -442,6 +442,16 @@ function emPoisoned(atoms, oi, ci) {
   return false;
 }
 
+// A single-* closer glued (through a word-only text atom) to a just-closed
+// <em> does not match a ** opener in marked.
+function emGlued(atoms, ci) {
+  const prev = atoms[ci - 1];
+  if (!prev || prev.k !== 'h' || !/^[\p{L}\p{N}]+$/u.test(prev.s)) return false;
+  let j = ci - 2;
+  while (j >= 0 && atoms[j].k === 'd' && atoms[j].len === 0) j--;
+  return j >= 0 && atoms[j].k === 'h' && atoms[j].s === '</em>';
+}
+
 function processDelims(atoms) {
   // CommonMark-style delimiter processing.
   let ci = 0;
@@ -456,6 +466,7 @@ function processDelims(atoms) {
       if ((closer.canOpen || a.canClose) && (a.olen + closer.olen) % 3 === 0 && (a.olen % 3 !== 0 || closer.olen % 3 !== 0)) continue;
       const u = (a.len >= 2 && closer.len >= 2) ? 2 : 1;
       if (u === 1 && closer.ch === '*' && emPoisoned(atoms, j, ci)) continue;
+      if (u === 1 && closer.ch === '*' && a.len >= 2 && emGlued(atoms, ci)) continue;
       opener = a; oi = j; break;
     }
     if (!opener) { ci++; continue; }
