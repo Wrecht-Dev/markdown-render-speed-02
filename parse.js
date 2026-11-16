@@ -471,11 +471,16 @@ function processDelims(atoms) {
     }
     if (!opener) { ci++; continue; }
     const use = (opener.len >= 2 && closer.len >= 2) ? 2 : 1;
+    // marked keeps a lone leftover * of a *** closer inside the strong when
+    // the content ends with an emphasis glued to the final word
+    const moveIn = use === 2 && closer.ch === '*' && closer.len === 3 && emGlued(atoms, ci);
     opener.len -= use; closer.len -= use;
+    if (moveIn) closer.len = 0;
     const tag = closer.ch === '~' ? 'del' : (use === 2 ? 'strong' : 'em');
     const plainMode = atoms.plainMode;
     atoms.splice(ci, 0, { k: 'h', s: plainMode ? '' : `</${tag}>` });
     atoms.splice(oi + 1, 0, { k: 'h', s: plainMode ? '' : `<${tag}>` });
+    if (moveIn) atoms.splice(ci + 1, 0, { k: 'h', s: plainMode ? '*' : '*' });
     // delimiters between the pair can no longer match: they become literal text
     for (let j = ci; j >= oi + 2; j--) {
       if (atoms[j].k === 'd') atoms[j] = { k: 'h', s: atoms[j].ch.repeat(atoms[j].len) };
