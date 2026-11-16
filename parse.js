@@ -1197,7 +1197,7 @@ class BlockParser {
     // block (marker, heading, hr, quote, html, another fence) or closes
     // the fence — marked gathers item text fence-aware. A pure setext
     // '=' line is kept as content padded with four spaces.
-    if (containerFailed && !blank && deep.type === 'code' && deep.fenced) {
+    if (containerFailed && !blank && deep.type === 'code' && deep.fenced && deep.hasContent) {
       let hasItem = false, hasQuote = false;
       for (let x = matched + 1; x < this.open.length - 1; x++) {
         if (this.open[x].type === 'item') hasItem = true;
@@ -1346,6 +1346,7 @@ class BlockParser {
         let c2 = { ...cur };
         curSkipSpaces(c2, d.fenceIndent);
         d.text += (matched >= 1 ? curRestX(c2, open[matched].type === 'quote') : curRest(c2)) + '\n';
+        d.hasContent = true;
         this.prevBlank = false;
         return;
       }
