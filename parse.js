@@ -805,13 +805,17 @@ function curRest(cur) {
   return ' '.repeat(cur.partial) + cur.line.slice(cur.off);
 }
 // The rest of the line with tabs in its leading whitespace run expanded
-// to spaces at absolute tab stops. Marked's container dedent behaves
-// this way: once a line has been carried through a blockquote or list
-// item frame, a tab in the remaining leading whitespace materializes as
-// spaces; at the top level (no frame) tabs stay raw.
-function curRestX(cur) {
+// to spaces at tab stops. Marked's container dedent behaves this way:
+// once a line has been carried through a container frame, a tab in the
+// remaining leading whitespace materializes as spaces; at the top level
+// (no frame) tabs stay raw. The tab stops are measured from the line's
+// absolute column — except when the innermost frame is a blockquote:
+// marked strips quote prefixes string-wise, and the remaining content
+// behaves as if it started at column 2 (one "> " wide) no matter how
+// many quote levels were stripped.
+function curRestX(cur, quoteBasis) {
   let out = ' '.repeat(cur.partial);
-  let col = cur.col + cur.partial;
+  let col = (quoteBasis ? 2 : cur.col) + cur.partial;
   const line = cur.line;
   let off = cur.off;
   while (off < line.length) {
@@ -839,6 +843,35 @@ function curAdvance(cur, cols) {
       if (n >= w) { cur.off++; cur.col += w; n -= w; }
       else { cur.off++; cur.partial = w - n; cur.col += n; n = 0; }
     } else { cur.off++; cur.col++; n--; }
+  }
+}
+// Leading-whitespace width and column advance measured from the
+// quote basis (column 2) instead of the absolute column, for use when
+// the innermost container frame is a blockquote.
+function curIndentX(cur, quoteBasis) {
+  if (!quoteBasis) return curIndent(cur);
+  let col = 2 + cur.partial, width = cur.partial, off = cur.off;
+  const line = cur.line;
+  while (off < line.length) {
+    const ch = line[off];
+    if (ch === ' ') { width++; col++; off++; }
+    else if (ch === '\t') { const w = 4 - (col % 4); width += w; col += w; off++; }
+    else break;
+  }
+  return width;
+}
+function curAdvanceX(cur, cols, quoteBasis) {
+  if (!quoteBasis) { curAdvance(cur, cols); return; }
+  let col = 2 + cur.partial, n = cols;
+  while (n > 0 && cur.partial > 0) { cur.partial--; cur.col++; col++; n--; }
+  while (n > 0 && cur.off < cur.line.length) {
+    const ch = cur.line[cur.off];
+    if (ch === '\t') {
+      const w = 4 - (col % 4);
+      const absW = 4 - (cur.col % 4);
+      if (n >= w) { cur.off++; cur.col += absW; col += w; n -= w; }
+      else { cur.off++; cur.partial = w - n; cur.col += absW; col += n; n = 0; }
+    } else { cur.off++; cur.col++; col++; n--; }
   }
 }
 function curIndent(cur) {
@@ -1012,7 +1045,7 @@ class BlockParser {
           curSkipSpaces(cur, 3);
           if (curPeek(cur) === '>') {
             curAdvance(cur, 1);
-            if (curPeek(cur) === ' ' || curPeek(cur) === '\t') curAdvance(cur, 1);
+            if (curPeek(cur) === ' ') curAdvance(cur, 1);
             matched = i;
             continue;
           }
@@ -1045,6 +1078,7 @@ class BlockParser {
     }
     const blank = curBlank(cur);
     const deep = this.deepest();
+    this.lineInnerType = open[matched].type;
 
     // ---- lazy paragraph continuation: only when the line would not
     // itself start a block that interrupts the paragraph. A lazy '='
@@ -1113,7 +1147,7 @@ class BlockParser {
     if (blank && !containerFailed && deep.type === 'para' &&
         curRest(cur).length > 0 &&
         open.slice(1, matched + 1).some(b => b.type === 'quote')) {
-      deep.lines.push(curRestX(cur));
+      deep.lines.push(curRestX(cur, true));
       this.prevBlank = false;
       return;
     }
@@ -1133,7 +1167,7 @@ class BlockParser {
         if (curIndent(cur) >= 4) {
           const c2 = { ...cur };
           curAdvance(c2, 4);
-          d.text += (matched >= 1 ? curRestX(c2) : curRest(c2)) + '\n';
+          d.text += (matched >= 1 ? curRestX(c2, open[matched].type === 'quote') : curRest(c2)) + '\n';
         } else {
           d.text += '\n';
         }
@@ -1143,7 +1177,7 @@ class BlockParser {
       if (d.type === 'code' && d.fenced) {
         const c2 = { ...cur };
         curSkipSpaces(c2, d.fenceIndent);
-        d.text += (matched >= 1 ? curRestX(c2) : curRest(c2)) + '\n';
+        d.text += (matched >= 1 ? curRestX(c2, open[matched].type === 'quote') : curRest(c2)) + '\n';
         this.prevBlank = true;
         return;
       }
@@ -1211,21 +1245,21 @@ class BlockParser {
         // strip up to fenceIndent columns
         let c2 = { ...cur };
         curSkipSpaces(c2, d.fenceIndent);
-        d.text += (matched >= 1 ? curRestX(c2) : curRest(c2)) + '\n';
+        d.text += (matched >= 1 ? curRestX(c2, open[matched].type === 'quote') : curRest(c2)) + '\n';
         this.prevBlank = false;
         return;
       }
       // indented code needs 4 more columns
-      if (curIndent(cur) >= 4) {
-        curAdvance(cur, 4);
-        d.text += (matched >= 1 ? curRestX(cur) : curRest(cur)) + '\n';
+      if (curIndentX(cur, open[matched].type === 'quote') >= 4) {
+        curAdvanceX(cur, 4, open[matched].type === 'quote');
+        d.text += (matched >= 1 ? curRestX(cur, open[matched].type === 'quote') : curRest(cur)) + '\n';
         this.prevBlank = false;
         return;
       }
       this.closeDownTo(this.open.length - 2);
     } else if (d.type === 'html') {
       const done = htmlBlockEnded(d, line);
-      d.text += (matched >= 1 ? curRestX(cur) : curRest(cur)) + (this.isFinalLine ? '' : '\n');
+      d.text += (matched >= 1 ? curRestX(cur, open[matched].type === 'quote') : curRest(cur)) + (this.isFinalLine ? '' : '\n');
       if (done) {
         this.closeDownTo(this.open.length - 2);
         this.pendingHtml = d;
@@ -1299,12 +1333,12 @@ class BlockParser {
       const deep = this.deepest();
       if (curBlank(cur)) return; // nothing left on this line
       const inPara = deep.type === 'para';
-      const indent = curIndent(cur);
+      const indent = curIndentX(cur, this.lineInnerType === 'quote');
       // a line carried through any container frame (existing or started
       // on this line) gets its leading tabs expanded, as marked's
       // container dedent does; a top-level line keeps them raw
       const framed = cur.off > 0 || cur.col > 0 || cur.partial > 0;
-      const rest = framed ? curRestX(cur) : curRest(cur);
+      const rest = framed ? curRestX(cur, this.lineInnerType === 'quote') : curRest(cur);
       const firstNon = rest.slice(indent);
 
       // a list on top of the stack only continues with a list item;
@@ -1320,9 +1354,10 @@ class BlockParser {
         if (inPara) this.closeDownTo(this.open.length - 2);
         curSkipSpaces(cur, 3);
         curAdvance(cur, 1); // '>'
-        if (curPeek(cur) === ' ' || curPeek(cur) === '\t') curAdvance(cur, 1);
+        if (curPeek(cur) === ' ') curAdvance(cur, 1);
         const q = newBlock('quote', this.deepestContainer());
         this.open.push(q);
+        this.lineInnerType = 'quote';
         continue;
       }
       // ATX heading
@@ -1441,10 +1476,10 @@ class BlockParser {
       }
       // indented code (not while a paragraph is open)
       if (!inPara && indent >= 4) {
-        curAdvance(cur, 4);
+        curAdvanceX(cur, 4, this.lineInnerType === 'quote');
         const code = newBlock('code', this.deepestContainer());
         code.fenced = false;
-        code.text = (framed ? curRestX(cur) : curRest(cur)) + '\n';
+        code.text = (framed ? curRestX(cur, this.lineInnerType === 'quote') : curRest(cur)) + '\n';
         this.open.push(code);
         return;
       }
@@ -1508,6 +1543,7 @@ class BlockParser {
       this.open.push(list);
     }
     const item = newBlock('item', list);
+    this.lineInnerType = 'item';
     item.padding = ind + contentIndent;
     item.emptyStart = curBlank(cur);
     this.open.push(item);
