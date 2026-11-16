@@ -1096,7 +1096,36 @@ class BlockParser {
         return;
       }
       if (!this.wouldInterrupt(cur, deep)) {
-        deep.lines.push(curRest(cur).replace(/^[ \t]+/, ''));
+        // the lazy line's text is taken after matching any remaining
+        // open containers below the failure point (a quote may fail
+        // while an item inside it still matches the line's indent);
+        // the text keeps its leading whitespace up to 3 columns of
+        // indentation and is stripped beyond that
+        const c2 = { ...cur };
+        for (let x = matched + 1; x < this.open.length; x++) {
+          const b = this.open[x];
+          if (b.type === 'quote') {
+            const save = { ...c2 };
+            if (curIndent(c2) <= 3) {
+              curSkipSpaces(c2, 3);
+              if (curPeek(c2) === '>') {
+                curAdvance(c2, 1);
+                if (curPeek(c2) === ' ') curAdvance(c2, 1);
+                continue;
+              }
+            }
+            Object.assign(c2, save);
+            continue;
+          }
+          if (b.type === 'item') {
+            if (curIndent(c2) >= b.padding) { curAdvance(c2, b.padding); continue; }
+            continue;
+          }
+          if (b.type === 'list') continue;
+          break;
+        }
+        const rest = curRest(c2);
+        deep.lines.push(curIndent(c2) <= 3 ? rest : rest.replace(/^[ \t]+/, ''));
         this.prevBlank = false;
         return;
       }
