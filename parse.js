@@ -36,7 +36,7 @@ function normLabel(s) {
 const TAG_RE = /^<(?:([a-zA-Z][a-zA-Z0-9-]*)(?:\s+[a-zA-Z_:][a-zA-Z0-9_.:-]*(?:\s*=\s*(?:[^"'=<>`\s]+|'[^']*'|"[^"]*"))?)*\s*\/?>|(\/[a-zA-Z][a-zA-Z0-9-]*)\s*>|!--(?:-?>|(?:[^-]|-(?!->))*-->)|!\?(?:[^?]|\?(?!>))*\?>|!\[CDATA\[(?:[^\]]|\](?!\]>))*\]\]>|!([a-zA-Z]+)(?:[^>]*)>|\?(?:[^?]|\?(?!>))*\?>)/;
 const SCHEME_AUTOLINK_RE = /^<([a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^<>\s]*)>/;
 const EMAIL_AUTOLINK_RE = /^<([a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+)>/;
-const BARE_URL_RE = /^(?:https?:\/\/|www\.)[^\s<>\[\]]*/;
+const BARE_URL_RE = /^(?:https?:\/\/|www\.)[^\s<>\[\]]*/i;
 const BARE_EMAIL_RE = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9_-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9_-]{0,61}[a-zA-Z0-9])?)+/;
 
 // Find the index just past the bracket matching src[start] === '['.
@@ -214,15 +214,15 @@ function trimAutolink(s) {
   let prev;
   do {
     prev = s;
-    s = s.replace(/[?!.,:*_~']+$/, '');
+    if (s.endsWith(';')) {
+      const em = /&[a-zA-Z0-9]+;$/.exec(s);
+      if (em) { s = s.slice(0, s.length - em[0].length); continue; }
+    }
+    s = s.replace(/[?!.,:*_~';]+$/, '');
     // unbalanced close parens
     let open = 0, close = 0;
     for (const ch of s) { if (ch === '(') open++; else if (ch === ')') close++; }
     while (s.endsWith(')') && close > open) { s = s.slice(0, -1); close--; }
-    if (s.endsWith(';')) {
-      const m = /&[a-zA-Z0-9]+;$/.exec(s);
-      if (m) s = s.slice(0, s.length - m[0].length);
-    }
   } while (s !== prev);
   return s;
 }
@@ -353,13 +353,13 @@ function parseInline(src, st) {
       if (!prevBad) {
         const rest = src.slice(i);
         let m = null, href = null, text = null;
-        if (rest.startsWith('www.') || /^https?:\/\//.test(rest)) {
+        if (/^www\./i.test(rest) || /^https?:\/\//i.test(rest)) {
           m = BARE_URL_RE.exec(rest);
           if (m) {
             let cand = m[0];
             // cap at link-forming '[' (BARE_URL_RE already excludes brackets)
             cand = trimAutolink(cand);
-            if (cand.length >= (rest.startsWith('www.') ? 5 : 8)) { text = cand; href = cand.startsWith('www.') ? 'http://' + cand : cand; }
+            if (cand.length >= (/^www\./i.test(cand) ? 5 : 8)) { text = cand; href = /^www\./i.test(cand) ? 'http://' + cand : cand; }
             else m = null;
           }
         }
@@ -505,20 +505,30 @@ const BLOCK_TAGS = new Set(('address article aside base basefont blockquote body
 
 function splitRow(line) {
   let s = line.trim();
+  // find code span ranges (pipes inside them do not split)
+  const spans = [];
+  {
+    let i = 0;
+    while (i < s.length) {
+      if (s[i] === '\\') { i += 2; continue; }
+      if (s[i] === '`') {
+        let run = 0; while (s[i + run] === '`') run++;
+        const close = findCodeClose(s, i + run, run);
+        if (close >= 0) { spans.push([i, close + run]); i = close + run; continue; }
+        i += run; continue;
+      }
+      i++;
+    }
+  }
+  const inSpan = (pos) => spans.some(([a, b]) => pos >= a && pos < b);
   const cells = [];
-  let cur = '', i = 0, codeRun = 0;
-  if (s.startsWith('|')) { i = 1; }
+  let cur = '', i = 0;
+  if (s.startsWith('|')) i = 1;
   let endedWithPipe = false;
   while (i < s.length) {
     const c = s[i];
     if (c === '\\' && i + 1 < s.length) { cur += s[i + 1] === '|' ? '|' : c + s[i + 1]; i += 2; endedWithPipe = false; continue; }
-    if (c === '`') {
-      let run = 0; while (s[i + run] === '`') run++;
-      if (codeRun === 0) codeRun = run;
-      else if (run === codeRun) codeRun = 0;
-      cur += '`'.repeat(run); i += run; endedWithPipe = false; continue;
-    }
-    if (c === '|' && codeRun === 0) { cells.push(cur); cur = ''; i++; endedWithPipe = true; continue; }
+    if (c === '|' && !inSpan(i)) { cells.push(cur); cur = ''; i++; endedWithPipe = true; continue; }
     cur += c; i++; endedWithPipe = false;
   }
   cells.push(cur);
@@ -764,6 +774,7 @@ function parseList(lines, i, defs) {
   const sameKind = (mk) => first.ordered ? (mk.ordered && mk.delim === first.delim) : (!mk.ordered && mk.bullet === first.bullet);
   let pendingBlanks = 0;
   let inFence = null;
+  let fenceContent = 0;
   const finishItem = (followedByItem) => {
     if (cur) {
       if (followedByItem && pendingBlanks > 0) loose = true;
@@ -780,7 +791,7 @@ function parseList(lines, i, defs) {
       const mk = matchListMarker(l);
       if (!mk || !sameKind(mk) || mk.ind - first.ind > 3) break;
       cur = { lines: [mk.blankAfter ? '' : dedentLine(lines[j].slice(mk.afterIdx), mk.contentIndent - mk.ind - mk.mlen, mk.ind + mk.mlen)], contentIndent: mk.contentIndent, startLine: j };
-      pendingBlanks = 0; inFence = null;
+      pendingBlanks = 0; inFence = null; fenceContent = 0;
       const f = matchFenceStart(cur.lines[0]);
       if (f) inFence = f;
       j++;
@@ -796,7 +807,7 @@ function parseList(lines, i, defs) {
       const nind = leadCols(nl);
       const nextIsItem = nmk && sameKind(nmk) && nmk.ind - first.ind <= 3 && nind < cur.contentIndent;
       if (!hasContent && !inFence && !nextIsItem) break; // item that starts blank is empty; list ends
-      if (nextIsItem || nind >= cur.contentIndent || inFence) {
+      if (nextIsItem || nind >= cur.contentIndent || (inFence && fenceContent > 0) || (inFence && nind >= cur.contentIndent)) {
         for (let b = j; b < k; b++) cur.lines.push('');
         pendingBlanks += k - j;
         j = k;
@@ -806,18 +817,24 @@ function parseList(lines, i, defs) {
     }
     const ind = leadCols(l);
     if (inFence) {
-      const content = ind >= cur.contentIndent ? dedentLine(l, cur.contentIndent, 0) : l;
-      cur.lines.push(content);
-      if (isFenceClose(content, inFence.ch, inFence.len)) inFence = null;
-      pendingBlanks = 0;
-      j++; continue;
+      if (ind < cur.contentIndent && fenceContent === 0) {
+        // fence has gathered no content line yet: it does not absorb this line
+        inFence = null;
+      } else {
+        const content = ind >= cur.contentIndent ? dedentLine(l, cur.contentIndent, 0) : l;
+        cur.lines.push(content);
+        fenceContent++;
+        if (isFenceClose(content, inFence.ch, inFence.len)) inFence = null;
+        pendingBlanks = 0;
+        j++; continue;
+      }
     }
     if (ind >= cur.contentIndent) {
       pendingBlanks = 0;
       const content = dedentLine(l, cur.contentIndent, 0);
       cur.lines.push(content);
       const f = matchFenceStart(content);
-      if (f) inFence = f;
+      if (f) { inFence = f; fenceContent = 0; }
       j++; continue;
     }
     if (isHr(l)) break;
