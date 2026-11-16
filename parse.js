@@ -33,7 +33,7 @@ function normLabel(s) {
 
 // ---------------- inline ----------------
 
-const TAG_RE = /^<(?:([a-zA-Z][a-zA-Z0-9-]*)(?:\s+[a-zA-Z_:][a-zA-Z0-9_.:-]*(?:\s*=\s*(?:[^"'=<>`\s]+|'[^']*'|"[^"]*"))?)*\s*\/?>|(\/[a-zA-Z][a-zA-Z0-9-]*)\s*>|!--(?:[^-]|-(?!->))*-->|!\?(?:[^?]|\?(?!>))*\?>|!\[CDATA\[(?:[^\]]|\](?!\]>))*\]\]>|!([a-zA-Z]+)(?:[^>]*)>|\?(?:[^?]|\?(?!>))*\?>)/;
+const TAG_RE = /^<(?:([a-zA-Z][a-zA-Z0-9-]*)(?:\s+[a-zA-Z_:][a-zA-Z0-9_.:-]*(?:\s*=\s*(?:[^"'=<>`\s]+|'[^']*'|"[^"]*"))?)*\s*\/?>|(\/[a-zA-Z][a-zA-Z0-9-]*)\s*>|!--(?:-?>|(?:[^-]|-(?!->))*-->)|!\?(?:[^?]|\?(?!>))*\?>|!\[CDATA\[(?:[^\]]|\](?!\]>))*\]\]>|!([a-zA-Z]+)(?:[^>]*)>|\?(?:[^?]|\?(?!>))*\?>)/;
 const SCHEME_AUTOLINK_RE = /^<([a-zA-Z][a-zA-Z0-9+.-]{1,31}:[^<>\s]*)>/;
 const EMAIL_AUTOLINK_RE = /^<([a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+)>/;
 const BARE_URL_RE = /^(?:https?:\/\/|www\.)[^\s<>\[\]]*/;
@@ -179,15 +179,18 @@ function tryLinkParse(src, bracket, st, isImage) {
     const d = parseLinkDest(src, after);
     if (d) { href = d.href; title = d.title; end = d.end; }
   }
+  let refAttempted = false;
   if (end < 0 && src[after] === '[') {
     const rclose = scanBracket(src, after);
     if (rclose >= 0) {
+      refAttempted = true;
       let ref = src.slice(after + 1, rclose);
       if (ref === '') ref = label;
       const def = st.defs.get(normLabel(ref));
       if (def) { href = def.href; title = def.title; end = rclose + 1; }
     }
   }
+  if (end < 0 && refAttempted) return null;
   if (end < 0) {
     const def = st.defs.get(normLabel(label));
     if (def) { href = def.href; title = def.title; end = after; }
@@ -250,11 +253,16 @@ function parseInline(src, st) {
   const pushHtml = (s) => { flush(); atoms.push({ k: 'h', s }); };
   let i = 0;
   const n = src.length;
+  let skipLeadWs = false;
   while (i < n) {
     const c = src[i];
+    if (skipLeadWs) {
+      if (c === ' ' || c === '\t') { i++; continue; }
+      skipLeadWs = false;
+    }
     if (c === '\\') {
       const d = src[i + 1];
-      if (d === '\n') { pushHtml(st.plain ? '\n' : '<br>'); i += 2; continue; }
+      if (d === '\n') { pushHtml(st.plain ? '\n' : '<br>'); skipLeadWs = true; i += 2; continue; }
       if (d !== undefined && PUNCT.has(d)) { txt += et(d); i += 2; continue; }
       txt += '\\'; i++; continue;
     }
@@ -376,6 +384,7 @@ function parseInline(src, st) {
       if (sp >= 2) {
         txt = txt.replace(/ +$/, '');
         pushHtml(st.plain ? '\n' : '<br>');
+        skipLeadWs = true;
         i++; continue;
       }
       txt += '\n'; i++; continue;
@@ -492,7 +501,7 @@ function splitRow(line) {
   let endedWithPipe = false;
   while (i < s.length) {
     const c = s[i];
-    if (c === '\\' && i + 1 < s.length) { cur += c + s[i + 1]; i += 2; endedWithPipe = false; continue; }
+    if (c === '\\' && i + 1 < s.length) { cur += s[i + 1] === '|' ? '|' : c + s[i + 1]; i += 2; endedWithPipe = false; continue; }
     if (c === '`') {
       let run = 0; while (s[i + run] === '`') run++;
       if (codeRun === 0) codeRun = run;
@@ -693,7 +702,7 @@ function tryHtmlBlock(lines, i, type7ok) {
   else if (/^<![A-Z]/.test(s)) { type = 4; closePat = />/; }
   else if (s.startsWith('<![CDATA[')) { type = 5; closePat = /\]\]>/; }
   else if ((m = /^<\/?([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>]|$)/.exec(s)) && BLOCK_TAGS.has(m[1].toLowerCase())) type = 6;
-  else if (type7ok && (m = /^<(\/?)([a-zA-Z][a-zA-Z0-9-]*)(?:\s+[a-zA-Z_:][a-zA-Z0-9_.:-]*(?:\s*=\s*(?:[^"'=<>`\s]+|'[^']*'|"[^"]*"))?)*\s*\/?>[ \t]*$/.exec(s)) && !BLOCK_TAGS.has(m[2].toLowerCase())) type = 7;
+  else if (type7ok && (m = /^<(?:([a-zA-Z][a-zA-Z0-9-]*)(?:\s+[a-zA-Z_:][a-zA-Z0-9_.:-]*(?:\s*=\s*(?:[^"'=<>`\s]+|'[^']*'|"[^"]*"))?)*\s*\/?>|\/([a-zA-Z][a-zA-Z0-9-]*)\s*)>[ \t]*$/.exec(s)) && !BLOCK_TAGS.has((m[1] || m[2]).toLowerCase())) type = 7;
   if (!type) return null;
   let j = i;
   if (type <= 5) {
@@ -730,14 +739,17 @@ function parseList(lines, i, defs) {
   const items = [];
   let loose = false;
   let j = i;
-  let cur = null; // {lines: [], }
+  let cur = null;
   const sameKind = (mk) => first.ordered ? (mk.ordered && mk.delim === first.delim) : (!mk.ordered && mk.bullet === first.bullet);
   let pendingBlanks = 0;
-  let inFence = null; // {ch, len}
-  const finishItem = () => {
+  let inFence = null;
+  const finishItem = (followedByItem) => {
     if (cur) {
+      if (followedByItem && pendingBlanks > 0) loose = true;
       while (cur.lines.length && isBlank(cur.lines[cur.lines.length - 1])) cur.lines.pop();
-      items.push(cur);
+      const tokens = lexBlocks(cur.lines, defs);
+      for (let k = 1; k < tokens.length; k++) if (tokens[k].sep) loose = true;
+      items.push({ tokens });
       cur = null;
     }
   };
@@ -745,29 +757,31 @@ function parseList(lines, i, defs) {
     const l = lines[j];
     if (cur === null) {
       const mk = matchListMarker(l);
-      if (!mk || !sameKind(mk) || j === i && false) break;
+      if (!mk || !sameKind(mk) || mk.ind > 3) break;
       cur = { lines: [mk.blankAfter ? '' : dedentLine(lines[j].slice(mk.afterIdx), mk.contentIndent - mk.ind - mk.mlen, mk.ind + mk.mlen)], contentIndent: mk.contentIndent, startLine: j };
       pendingBlanks = 0; inFence = null;
-      const f = matchFenceStart(mk.firstContent);
+      const f = matchFenceStart(cur.lines[0]);
       if (f) inFence = f;
       j++;
       continue;
     }
     if (isBlank(l)) {
-      // look ahead
-      let k = j + 1;
+      let k = j;
+      while (k < lines.length && isBlank(lines[k])) k++;
       if (k >= lines.length) { j = k; break; }
+      const hasContent = cur.lines.some(x => !isBlank(x));
       const nl = lines[k];
-      if (isBlank(nl)) { j = k; break; } // two blanks end the list
       const nmk = matchListMarker(nl);
       const nind = leadCols(nl);
-      if ((nmk && sameKind(nmk) && nind < cur.contentIndent) || nind >= cur.contentIndent || inFence) {
-        pendingBlanks++;
-        cur.lines.push('');
-        j++;
+      const nextIsItem = nmk && sameKind(nmk) && nmk.ind <= 3 && nind < cur.contentIndent;
+      if (!hasContent && !inFence && !nextIsItem) break; // item that starts blank is empty; list ends
+      if (nextIsItem || nind >= cur.contentIndent || inFence) {
+        for (let b = j; b < k; b++) cur.lines.push('');
+        pendingBlanks += k - j;
+        j = k;
         continue;
       }
-      break; // blank then unrelated content: list ends
+      break; // blanks then unrelated content: list ends
     }
     const ind = leadCols(l);
     if (inFence) {
@@ -787,30 +801,42 @@ function parseList(lines, i, defs) {
     if (isHr(l)) break;
     const mk = matchListMarker(l);
     if (mk && sameKind(mk)) {
-      if (pendingBlanks) loose = true;
-      finishItem();
+      finishItem(true);
       continue; // reprocess line as new item
     }
-    // lazy continuation: paragraph continuation text
+    if (ind <= 3 && mk) break; // a different list marker ends this list
+    // lazy continuation: glue onto the previous content line
     if (pendingBlanks === 0 && cur.lines.length && !isBlank(cur.lines[cur.lines.length - 1]) && !startsInterruptBlock(lines, j, defs)) {
-      cur.lines.push(l);
+      const t = leadCols(l) >= 4 ? consumeCols(l, 4) : l;
+      cur.lines[cur.lines.length - 1] += '\n' + t;
       j++; continue;
     }
     break;
   }
-  finishItem();
+  finishItem(false);
   if (!items.length) return null;
-  // item separated by blank lines at its end counts toward looseness when
-  // the blank was between this item's content and the next item
-  return { token: { t: 'list', ordered: first.ordered, start: first.num, loose, items: items.map(it => ({ lines: it.lines })) }, next: j };
+  return { token: { t: 'list', ordered: first.ordered, start: first.num, loose, items }, next: j };
+}
+
+// Can a lazy (unmarked) line continue this content? True when the innermost
+// open block is a paragraph.
+function canLazyTokens(tokens) {
+  if (!tokens.length) return false;
+  const last = tokens[tokens.length - 1];
+  if (last.t === 'para') return true;
+  if (last.t === 'quote') return canLazyTokens(last.tokens);
+  if (last.t === 'list') return last.items.length ? canLazyTokens(last.items[last.items.length - 1].tokens) : false;
+  return false;
 }
 
 function lexBlocks(lines, defs, endsNl = false) {
   const tokens = [];
   let i = 0;
+  let blankBefore = false;
+  const push = (tok) => { tok.sep = blankBefore && tokens.length > 0; blankBefore = false; tokens.push(tok); };
   while (i < lines.length) {
     const l = lines[i];
-    if (isBlank(l)) { i++; continue; }
+    if (isBlank(l)) { blankBefore = true; i++; continue; }
     // fenced code
     const fence = matchFenceStart(l);
     if (fence) {
@@ -820,17 +846,20 @@ function lexBlocks(lines, defs, endsNl = false) {
         content.push(consumeCols(lines[j], Math.min(fence.indent, leadCols(lines[j]))));
         j++;
       }
-      if (j < lines.length) j++; // closing fence
-      const text = content.length ? content.join('\n') + '\n' : '';
+      const closed = j < lines.length;
+      if (closed) j++; // closing fence
+      let text = content.map(x => x + '\n').join('');
+      if (closed && text.endsWith('\n')) text = text.slice(0, -1);
+      if (text && !text.endsWith('\n')) text += '\n';
       const lang = fence.info ? unescapeStr(fence.info.split(/\s+/)[0]) : '';
-      tokens.push({ t: 'code', text, lang, fenced: true });
+      push({ t: 'code', text, lang, fenced: true });
       i = j; continue;
     }
     // ATX heading
     const atx = matchATX(l);
-    if (atx) { tokens.push({ t: 'heading', depth: atx.depth, text: atx.text }); i++; continue; }
+    if (atx) { push({ t: 'heading', depth: atx.depth, text: atx.text }); i++; continue; }
     // thematic break
-    if (isHr(l)) { tokens.push({ t: 'hr' }); i++; continue; }
+    if (isHr(l)) { push({ t: 'hr' }); i++; continue; }
     // indented code
     if (leadCols(l) >= 4) {
       const content = [];
@@ -849,7 +878,7 @@ function lexBlocks(lines, defs, endsNl = false) {
         j++;
       }
       while (content.length && content[content.length - 1] === '') content.pop();
-      tokens.push({ t: 'code', text: content.join('\n') + '\n', lang: '', fenced: false });
+      push({ t: 'code', text: content.join('\n') + '\n', lang: '', fenced: false });
       i = j; continue;
     }
     // blockquote
@@ -860,25 +889,33 @@ function lexBlocks(lines, defs, endsNl = false) {
         const q = stripQuote(lines[j]);
         if (q !== null) { inner.push(q); j++; continue; }
         const cl = lines[j];
-        if (!isBlank(cl) && inner.length && !isBlank(inner[inner.length - 1]) && !startsInterruptBlock(lines, j, defs)) {
-          inner.push(cl); j++; continue;
+        if (!isBlank(cl) && inner.length && !isBlank(inner[inner.length - 1]) && canLazyTokens(lexBlocks(inner, defs)) && !startsInterruptBlock(lines, j, defs)) {
+          if (/^ {0,3}(=+|-+)[ \t]*$/.test(cl)) {
+            let chunkStart = 0;
+            for (let k = inner.length - 1; k >= 0; k--) { if (isBlank(inner[k])) { chunkStart = k + 1; break; } }
+            const chunkLen = inner.length - chunkStart;
+            inner[inner.length - 1] += '\n' + (chunkLen >= 2 ? '    ' + cl.trim() : cl);
+          } else {
+            inner[inner.length - 1] += '\n' + (leadCols(cl) >= 4 ? consumeCols(cl, 4) : cl);
+          }
+          j++; continue;
         }
         break;
       }
-      tokens.push({ t: 'quote', lines: inner });
+      push({ t: 'quote', tokens: lexBlocks(inner, defs) });
       i = j; continue;
     }
     // list
     if (matchListMarker(l)) {
       const r = parseList(lines, i, defs);
-      if (r) { tokens.push(r.token); i = r.next; continue; }
+      if (r) { push(r.token); i = r.next; continue; }
     }
     // html block
     const hb = tryHtmlBlock(lines, i, true);
     if (hb) {
       const nx = i + hb.consumed;
       const addNl = nx < lines.length ? !isBlank(lines[nx]) : endsNl;
-      tokens.push({ t: 'html', text: hb.text + (addNl ? '\n' : '') });
+      push({ t: 'html', text: hb.text + (addNl ? '\n' : '') });
       i += hb.consumed; continue;
     }
     // link reference definition
@@ -894,7 +931,10 @@ function lexBlocks(lines, defs, endsNl = false) {
     let heading = null, table = null;
     while (j < lines.length) {
       const cl = lines[j];
-      if (isBlank(cl)) break;
+      if (isBlank(cl)) {
+        if (plines.length && j === lines.length - 1 && !endsNl && cl.length) { plines.push(cl); j++; }
+        break;
+      }
       if (plines.length) {
         // setext underline?
         if (leadCols(cl) <= 3) {
@@ -919,18 +959,18 @@ function lexBlocks(lines, defs, endsNl = false) {
       j++;
     }
     if (table) {
-      if (plines.length) tokens.push({ t: 'para', text: plines.join('\n') });
+      if (plines.length) push({ t: 'para', text: plines.join('\n') });
       const rows = [];
       let rj = table.startLine + 2;
       while (rj < lines.length && !isBlank(lines[rj]) && !startsInterruptBlock(lines, rj, defs)) {
         rows.push(splitRow(lines[rj]));
         rj++;
       }
-      tokens.push({ t: 'table', header: table.header, aligns: table.aligns, rows });
+      push({ t: 'table', header: table.header, aligns: table.aligns, rows });
       i = rj; continue;
     }
-    if (heading) { tokens.push({ t: 'heading', depth: heading.depth, text: plines.join('\n').trim() }); i = j; continue; }
-    if (plines.length) { tokens.push({ t: 'para', text: plines.join('\n') }); i = j; continue; }
+    if (heading) { push({ t: 'heading', depth: heading.depth, text: plines.join('\n').trim() }); i = j; continue; }
+    if (plines.length) { push({ t: 'para', text: plines.join('\n') }); i = j; continue; }
     i++; // safety
   }
   return tokens;
@@ -954,10 +994,8 @@ function renderToken(tok, defs, tight) {
       return `<pre><code${tok.lang ? ` class="language-${escAttrNE(tok.lang)}"` : ''}>${escCode(tok.text)}</code></pre>\n`;
     case 'hr': return '<hr>\n';
     case 'html': return tok.text;
-    case 'quote': {
-      const inner = lexBlocks(tok.lines, defs);
-      return `<blockquote>\n${renderTokens(inner, defs)}</blockquote>\n`;
-    }
+    case 'quote':
+      return `<blockquote>\n${renderTokens(tok.tokens, defs)}</blockquote>\n`;
     case 'list': {
       const tag = tok.ordered ? 'ol' : 'ul';
       const startAttr = tok.ordered && tok.start !== 1 ? ` start="${tok.start}"` : '';
@@ -992,7 +1030,7 @@ function renderToken(tok, defs, tight) {
 }
 
 function renderListItem(item, list, defs) {
-  const tokens = lexBlocks(item.lines, defs);
+  const tokens = item.tokens;
   let task = null;
   if (tokens.length && tokens[0].t === 'para') {
     const m = /^\[([ xX])\](?:[ \t]|$)/.exec(tokens[0].text) || /^\[([ xX])\]$/.exec(tokens[0].text.trimEnd());
