@@ -580,9 +580,9 @@ function parseBlocks(src, refs) {
     let rest = lines[li];
     let absCol = 0;
     if (pendingHtml) {
-      // a terminator-closed html block loses its trailing newline when a
-      // blank line follows it
-      if (/^ *$/.test(rest)) pendingHtml.termEnd = false;
+      // a terminator-closed html block loses its trailing newline only
+      // when a truly empty line follows it
+      if (rest === '') pendingHtml.termEnd = false;
       pendingHtml = null;
     }
 
@@ -1056,6 +1056,33 @@ const AUTOLINK_EMAIL_RE = /^<([A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A
 const HTML_COMMENT_RE = /^<!--(?:>|->|[\s\S]*?-->)/;
 const EMAIL_AUTOLINK_RE = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/;
 
+// marked's link label matching never forms a link when the label
+// contains a code span whose content itself contains a backtick and
+// further label text follows that span
+function labelCodeSpanBlocked(s) {
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === '\\') { i += 2; continue; }
+    if (s[i] === '`') {
+      let n = 0; while (s[i + n] === '`') n++;
+      let j = i + n;
+      let close = -1;
+      while (j < s.length) {
+        if (s[j] === '`') {
+          let m = 0; while (s[j + m] === '`') m++;
+          if (m === n) { close = j; break; }
+          j += m;
+        } else j++;
+      }
+      if (close === -1) return false;
+      if (s.slice(i + n, close).includes('`') && /\S/.test(s.slice(close + n))) return true;
+      i = close + n; continue;
+    }
+    i++;
+  }
+  return false;
+}
+
 // marked does not autolink inside link text: when a link or image forms,
 // any autolink nodes among its children revert to plain text
 function stripAutoLinks(nodes) {
@@ -1194,6 +1221,28 @@ function parseInline(text, refs) {
           j += r2;
         } else j++;
       }
+      // Inside a link label, marked's label matching decides the fate of
+      // a run whose pair lies past the label's closing bracket: only the
+      // first in-label-unclosed run is decisive, and only when its pair
+      // lies on the rest of the line — then the span really forms and
+      // swallows the bracket. Any other crossing run stays literal so
+      // the bracket can close the label.
+      const top = brackets[brackets.length - 1];
+      if (top) {
+        let bracketEnd = i + run;
+        while (bracketEnd < n && text[bracketEnd] !== ']') {
+          if (text[bracketEnd] === '\\') bracketEnd++;
+          bracketEnd++;
+        }
+        if (found === -1 || found > bracketEnd) {
+          if (top.spanDone) { buf += '`'.repeat(run); i += run; continue; }
+          top.spanDone = true;
+          if (found === -1) { buf += '`'.repeat(run); i += run; continue; }
+          let lineEnd = bracketEnd;
+          while (lineEnd < n && text[lineEnd] !== '\n') lineEnd++;
+          if (found > lineEnd) { buf += '`'.repeat(run); i += run; continue; }
+        }
+      }
       if (found === -1) { buf += '`'.repeat(run); i += run; continue; }
       let content = text.slice(i + run, found).replace(/\n/g, ' ');
       if (content.length >= 2 && content[0] === ' ' && content[content.length - 1] === ' ' && content.trim() !== '') {
@@ -1268,15 +1317,14 @@ function parseInline(text, refs) {
 
     if (c === ']') {
       flushBuf();
-      // find nearest active bracket opener
-      let bi = -1;
-      for (let k = brackets.length - 1; k >= 0; k--) {
-        if (!brackets[k].inactive) { bi = k; break; }
-      }
+      // only the nearest bracket opener can match this ']': an inactive
+      // opener blocks the ones below it and is discarded
+      const bi = brackets.length - 1;
       if (bi === -1) { buf += ']'; i++; continue; }
       const opener = brackets[bi];
+      if (opener.inactive) { brackets.pop(); buf += ']'; i++; continue; }
       const link = tryParseLinkAt(text, i, opener, refs, nodes);
-      if (link) {
+      if (link && !labelCodeSpanBlocked(text.slice(opener.srcIndex + (opener.isImage ? 2 : 1), i))) {
         // remove the '[' text node at opener.nodeIndex: nodes after it are children
         const children = stripAutoLinks(nodes.splice(opener.nodeIndex + 1));
         nodes.pop(); // the '[' or '![' text node
