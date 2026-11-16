@@ -966,8 +966,12 @@ class BlockParser {
 
   finalize(b) {
     if (b.type === 'code') {
-      // strip trailing blank lines of indented code
-      if (!b.fenced) {
+      if (b.fenced) {
+        // a fenced block's content loses exactly one trailing newline
+        // however the block ends (closing fence, container cut, EOF)
+        if (b.text.endsWith('\n')) b.text = b.text.slice(0, -1);
+      } else {
+        // strip trailing blank lines of indented code
         b.text = b.text.replace(/\n+$/, '') ;
         if (b.text) b.text += '\n';
       }
@@ -1047,6 +1051,38 @@ class BlockParser {
         deep.lines.push(curRest(cur).replace(/^[ \t]+/, ''));
         this.prevBlank = false;
         return;
+      }
+    }
+    // a fenced code block inside a list item keeps consuming lines that
+    // fail the item's indentation, unless the line itself starts a new
+    // block (marker, heading, hr, quote, html, another fence) or closes
+    // the fence — marked gathers item text fence-aware. A pure setext
+    // '=' line is kept as content padded with four spaces.
+    if (containerFailed && !blank && deep.type === 'code' && deep.fenced) {
+      let hasItem = false, hasQuote = false;
+      for (let x = matched + 1; x < this.open.length - 1; x++) {
+        if (this.open[x].type === 'item') hasItem = true;
+        if (this.open[x].type === 'quote') hasQuote = true;
+      }
+      if (hasItem && !hasQuote) {
+        const ind = curIndent(cur);
+        const rest = curRest(cur);
+        const firstNon = rest.slice(ind);
+        const fenceRun = /^(`{3,}|~{3,})/.exec(firstNon);
+        const endsIt = ind <= 3 && (
+          listMarkerAt(cur) !== null ||
+          /^#{1,6}([ \t]|$)/.test(firstNon) ||
+          /^([*\-_])(?:[ \t]*\1){2,}[ \t]*$/.test(firstNon) ||
+          firstNon[0] === '>' ||
+          fenceRun !== null ||
+          (firstNon[0] === '<' && htmlBlockStart(firstNon, false)));
+        if (!endsIt) {
+          let content = rest.replace(/^[ \t]+/, '');
+          if (/^=+[ \t]*$/.test(content)) content = '    ' + content;
+          deep.text += content + '\n';
+          this.prevBlank = false;
+          return;
+        }
       }
     }
     if (containerFailed) {
@@ -1154,8 +1190,6 @@ class BlockParser {
         const rest = curRest(cur);
         const m = ind <= 3 && /^(`{3,}|~{3,})[ \t]*$/.exec(rest.replace(/^[ \t]+/, ''));
         if (m && m[1][0] === d.fenceChar && m[1].length >= d.fenceLen) {
-          // a closing fence drops one trailing blank line of content
-          if (d.text.endsWith('\n\n')) d.text = d.text.slice(0, -1);
           this.closeDownTo(this.open.length - 2);
           this.prevBlank = false;
           return;
