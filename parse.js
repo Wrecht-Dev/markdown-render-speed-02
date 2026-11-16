@@ -1177,6 +1177,7 @@ function parseInline(text, refs) {
   const nodes = [];
   const delims = []; // {node, char, len, canOpen, canClose}
   const brackets = []; // {nodeIndex, isImage, inactive, textStartNode}
+  const failedLabels = []; // node ranges of labels whose link failed
   let buf = '';
   let i = 0;
   const n = text.length;
@@ -1356,6 +1357,9 @@ function parseInline(text, refs) {
       }
       // not a link: opener is dead
       brackets.splice(bi, 1);
+      if (opener.nodeIndex >= 0 && opener.nodeIndex < nodes.length && nodes.length > opener.nodeIndex + 1) {
+        failedLabels.push({ from: nodes[opener.nodeIndex], to: nodes[nodes.length - 1] });
+      }
       buf += ']'; i++; continue;
     }
 
@@ -1387,8 +1391,9 @@ function parseInline(text, refs) {
         const m = (c === 'w' ? /^www\.[^\s<]+/ : /^https?:\/\/[^\s<]+/i).exec(rest);
         if (m) {
           let url = m[0];
-          // inside a pending bracket, an autolink may not swallow the ']'
-          if (brackets.length > 0) {
+          // inside an active pending bracket, an autolink may not
+          // swallow the ']' (a deactivated opener no longer bounds it)
+          if (brackets.some((b) => !b.inactive)) {
             const cut = url.indexOf(']');
             if (cut !== -1) url = url.slice(0, cut);
           }
@@ -1445,36 +1450,35 @@ function parseInline(text, refs) {
     buf += c; i++;
   }
   flushBuf();
-  processAllEmphasis(nodes);
+  processAllEmphasis(nodes, failedLabels);
   return nodes;
 }
 
 // Emphasis is matched within each node list separately: delimiters inside a
 // link's text cannot pair with delimiters outside it, and vice versa.
-function processAllEmphasis(nodes) {
+function processAllEmphasis(nodes, failedLabels) {
   const delims = [];
   for (const nd of nodes) {
     if (nd.kind === 'delim') delims.push({ node: nd, char: nd.char, canOpen: nd.canOpen, canClose: nd.canClose, olen: nd.len });
   }
-  if (delims.length) processEmphasis(nodes, delims, null);
+  if (delims.length) processEmphasis(nodes, delims, null, failedLabels);
   for (const nd of nodes) {
-    if (nd.children) processAllEmphasis(nd.children);
+    if (nd.children) processAllEmphasis(nd.children, failedLabels);
   }
 }
 
 function trimAutolink(url) {
-  // GFM extended autolink trimming
-  for (;;) {
-    const before = url;
-    while (/[?!.,:*_~]$/.test(url)) {
-      // '?' '!' '.' ',' ':' '*' '_' '~' trimmed from end (with rules)
-      const last = url[url.length - 1];
-      if (last === '?') { url = url.slice(0, -1); continue; }
-      break;
+  // GFM extended autolink trimming. Parens: a '(' increments the depth
+  // and a ')' decrements it, but the depth never goes below zero (an
+  // unmatched ')' is simply part of the URL). If the URL ends with an
+  // unclosed '(' tail, it is cut at the first unmatched '('.
+  {
+    const stack = [];
+    for (let k = 0; k < url.length; k++) {
+      if (url[k] === '(') stack.push(k);
+      else if (url[k] === ')' && stack.length) stack.pop();
     }
-    // simpler: apply char-by-char rules below instead
-    url = before;
-    break;
+    if (stack.length) url = url.slice(0, stack[0]);
   }
   let changed = true;
   while (changed && url.length) {
@@ -1488,14 +1492,18 @@ function trimAutolink(url) {
       url = url.slice(0, -1); changed = true; continue;
     }
     if (last === ')') {
-      const opens = (url.match(/\(/g) || []).length;
-      const closes = (url.match(/\)/g) || []).length;
-      if (closes > opens) { url = url.slice(0, -1); changed = true; continue; }
-    }
-    if (last === ']') {
-      const opens = (url.match(/\[/g) || []).length;
-      const closes = (url.match(/\]/g) || []).length;
-      if (closes > opens) { url = url.slice(0, -1); changed = true; continue; }
+      // a trailing ')' is trimmed only when it closed no '(' (it is a
+      // "floor" paren in the scan above)
+      let depth = 0;
+      let floor = false;
+      for (let k = 0; k < url.length; k++) {
+        if (url[k] === '(') depth++;
+        else if (url[k] === ')') {
+          if (depth > 0) depth--;
+          else if (k === url.length - 1) floor = true;
+        }
+      }
+      if (floor) { url = url.slice(0, -1); changed = true; continue; }
     }
     if (last === '}') {
       const opens = (url.match(/\{/g) || []).length;
@@ -1552,7 +1560,7 @@ function tryParseLinkAt(text, i, opener, refs, nodes) {
   return null;
 }
 
-function processEmphasis(nodes, delims, stackBottom) {
+function processEmphasis(nodes, delims, stackBottom, failedLabels) {
   // delims: array of entries {node,...} in document order for this node list.
   // We process closers in order.
   let di = 0;
@@ -1570,6 +1578,27 @@ function processEmphasis(nodes, delims, stackBottom) {
         // pairs rejected by the span rule stay rejected in later passes
         // over child node lists
         if (closer.node._blk && closer.node._blk.has(cand.node)) { oi--; continue; }
+        // inside a failed link label, marked does not form an emphasis
+        // pair whose span contains a code span with a backtick in it
+        if (failedLabels && failedLabels.length) {
+          const aI = nodes.indexOf(cand.node);
+          const bI = nodes.indexOf(closer.node);
+          if (aI !== -1 && bI !== -1) {
+            let inRange = false;
+            for (const r of failedLabels) {
+              const fi = nodes.indexOf(r.from);
+              const ti = nodes.indexOf(r.to);
+              if (fi !== -1 && ti !== -1 && aI >= fi && bI <= ti) { inRange = true; break; }
+            }
+            if (inRange) {
+              let hasTickCode = false;
+              for (let k = aI + 1; k < bI; k++) {
+                if (nodes[k].kind === 'code' && nodes[k].text.includes('`')) { hasTickCode = true; break; }
+              }
+              if (hasTickCode) { oi--; continue; }
+            }
+          }
+        }
         // odd-match rule
         const bothFlank = (cand.canClose || closer.canOpen);
         if (bothFlank && (cand.node.len + closer.node.len) % 3 === 0 && !(cand.node.len % 3 === 0 && closer.node.len % 3 === 0)) {
