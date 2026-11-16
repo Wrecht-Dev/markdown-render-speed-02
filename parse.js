@@ -544,6 +544,8 @@ function splitRow(line) {
         let run = 0; while (s[i + run] === '`') run++;
         const close = findCodeClose(s, i + run, run);
         if (close >= 0) { spans.push([i, close + run]); i = close + run; continue; }
+        const nxt = s.indexOf('`', i + run);
+        if (nxt >= 0) { let m = 0; while (s[nxt + m] === '`') m++; spans.push([i, nxt + m]); i = nxt + m; continue; }
         i += run; continue;
       }
       i++;
