@@ -451,9 +451,12 @@ class InlineParser {
     let i = this.pos;
     let run = 0;
     while (s[i + run] === '`') run++;
-    // find a matching run of exactly `run` backticks
+    // find a matching run of exactly `run` backticks; the search may
+    // not cross a ']' that forms a link (the label is its own unit)
+    const cap = this.autolinkCap(i);
+    const limit = cap === -1 ? n : cap;
     let j = i + run;
-    while (j < n) {
+    while (j < limit) {
       if (s[j] === '`') {
         let r2 = 0;
         while (s[j + r2] === '`') r2++;
@@ -1284,6 +1287,15 @@ class BlockParser {
         return;
       }
       if (d.type === 'table') {
+        // a whitespace-only line of up to three spaces and one tab is
+        // absorbed as a row of empty cells rather than ending the table
+        if (/^ {0,3}\t$/.test(curRest(cur))) {
+          const cells = [];
+          while (cells.length < d.aligns.length) cells.push('');
+          d.rows.push(cells);
+          this.prevBlank = false;
+          return;
+        }
         this.closeDownTo(this.open.length - 2);
         this.markBlank();
         this.prevBlank = true;
