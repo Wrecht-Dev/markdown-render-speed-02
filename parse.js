@@ -991,7 +991,12 @@ function lexBlocks(lines, defs, endsNl = false, top = true) {
       const content = [];
       let j = i + 1;
       while (j < lines.length && !isFenceClose(lines[j], fence.ch, fence.len)) {
-        content.push(fence.ch === '`' ? consumeCols(lines[j], Math.min(fence.indent, leadCols(lines[j]))) : lines[j]);
+        if (fence.ch === '`') {
+          const ln = lines[j];
+          let k = 0, cnt = 0;
+          while (k < ln.length && cnt < fence.indent && (ln[k] === ' ' || ln[k] === '\t')) { k++; cnt++; }
+          content.push(ln.slice(k));
+        } else content.push(lines[j]);
         j++;
       }
       const closed = j < lines.length;
