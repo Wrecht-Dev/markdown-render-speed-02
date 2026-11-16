@@ -607,7 +607,11 @@ function parseBlocks(src, refs) {
             }
           }
           else if (rest[0] === '\t') {
-            const w = 4 - (absCol % 4);
+            // a tab directly after the marker serves as the marker's
+            // whitespace: it expands to the next tab stop measured
+            // from its character position in this line, and the marker
+            // consumes one column of the expansion
+            const w = 4 - ((ind.chars + 1) % 4);
             rest = ' '.repeat(Math.max(0, w - 1)) + rest.slice(1);
             absCol += 1;
           }
@@ -978,7 +982,7 @@ function parseBlocks(src, refs) {
           rest = rest.slice(consumed);
           if (rest[0] === ' ') { rest = rest.slice(1); absCol += 1; }
           else if (rest[0] === '\t') {
-            const w = 4 - (absCol % 4);
+            const w = 4 - ((ind.chars + 1) % 4);
             rest = ' '.repeat(Math.max(0, w - 1)) + rest.slice(1);
             absCol += 1;
           }
@@ -1462,6 +1466,16 @@ function processAllEmphasis(nodes, failedLabels) {
     if (nd.kind === 'delim') delims.push({ node: nd, char: nd.char, canOpen: nd.canOpen, canClose: nd.canClose, olen: nd.len });
   }
   if (delims.length) processEmphasis(nodes, delims, null, failedLabels);
+  // settle absorb marks: a leftover closing marker that is still in
+  // this list with its marked length never paired, so it moves inside
+  // the strong it closed
+  for (let ix = nodes.length - 1; ix >= 0; ix--) {
+    const nd = nodes[ix];
+    if (nd.kind === 'delim' && nd._absorbInto && nd.len === nd._absorbLen) {
+      nodes.splice(ix, 1);
+      nd._absorbInto.children.push({ kind: 'text', text: nd.char.repeat(nd.len) });
+    }
+  }
   for (const nd of nodes) {
     if (nd.children) processAllEmphasis(nd.children, failedLabels);
   }
@@ -1649,6 +1663,14 @@ function processEmphasis(nodes, delims, stackBottom, failedLabels) {
     const inner = nodes.splice(a + 1, b - a - 1);
     const wrap = { kind: closer.char === '~' ? 'del' : use === 2 ? 'strong' : 'em', children: inner };
     nodes.splice(a + 1, 0, wrap);
+    // a strong that exhausts its opener but only partially uses the
+    // closing run keeps the leftover marker inside itself when the
+    // wrapped span contains a completed em and the leftover never
+    // pairs again (settled in processAllEmphasis)
+    if (use === 2 && opener.node.len === 0 && closer.node.len > 0 && inner.some((nd) => nd.kind === 'em')) {
+      closer.node._absorbInto = wrap;
+      closer.node._absorbLen = closer.node.len;
+    }
     // remove delim entries strictly between opener and closer
     for (let k = di - 1; k > oi; k--) delims.splice(k, 1);
     di = delims.indexOf(closer);
