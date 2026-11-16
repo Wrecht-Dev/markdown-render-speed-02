@@ -157,7 +157,7 @@ function normalizeLabel(s) {
 //  {k:'wrap', tag, children, href, title}         emph/strong/del/link/image
 
 const TAG_NAME = '[A-Za-z][A-Za-z0-9-]*';
-const ATTR = '(?:\\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\\s*=\\s*(?:[^ \'"=<>`]+|\'[^\']*\'|"[^"]*"))?)';
+const ATTR = '(?:\\s+[A-Za-z_:][A-Za-z0-9_.:-]*(?:\\s*=\\s*(?:[^\\s\'"=<>`]+|\'[^\']*\'|"[^"]*"))?)';
 const OPEN_TAG = new RegExp('^<' + TAG_NAME + ATTR + '*\\s*/?>');
 const CLOSE_TAG = new RegExp('^</' + TAG_NAME + '\\s*>');
 const AUTOLINK_RE = /^<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^ <>\x00-\x20]*)>/;
@@ -811,10 +811,24 @@ function curSkipSpaces(cur, maxCols) {
 }
 
 let BLOCK_ID = 0;
+let CURPARSER = null;
 function newBlock(type, parent) {
   const b = { type, children: [], parent: parent || null, id: BLOCK_ID++,
     lastLineBlank: false, text: '', lines: null };
-  if (parent) parent.children.push(b);
+  if (parent) {
+    // looseness: a block that starts right after a blank line, inside a
+    // list item that already has a block, or a non-first item that starts
+    // right after a blank line, makes the containing list loose
+    if (CURPARSER && CURPARSER.prevBlank) {
+      if (type === 'item' && parent.type === 'list' && parent.children.length >= 1) {
+        parent.loose = true;
+      } else if (parent.type === 'item' && parent.children.length >= 1 &&
+                 parent.parent && parent.parent.type === 'list') {
+        parent.parent.loose = true;
+      }
+    }
+    parent.children.push(b);
+  }
   return b;
 }
 
@@ -864,6 +878,7 @@ class BlockParser {
   }
 
   parse(src) {
+    CURPARSER = this;
     this.doc = newBlock('doc', null);
     this.open = [this.doc];
     this.prevBlank = false;
@@ -898,16 +913,8 @@ class BlockParser {
         if (b.text) b.text += '\n';
       }
     } else if (b.type === 'list') {
-      b.loose = false;
-      const items = b.children;
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        if (i < items.length - 1 && endsBlank(item)) b.loose = true;
-        for (let j = 0; j < item.children.length - 1; j++) {
-          if (endsBlank(item.children[j])) b.loose = true;
-        }
-      }
-      for (const item of items) item.parentList = b;
+      if (b.loose === undefined) b.loose = false;
+      for (const item of b.children) item.parentList = b;
     }
   }
 
@@ -1070,7 +1077,9 @@ class BlockParser {
         }
         this.markBlank();
       }
-      this.prevBlank = true;
+      // a blank line that falls inside a blockquote does not count as a
+      // block separator for list looseness
+      this.prevBlank = !this.open.some(b => b.type === 'quote');
       return;
     }
 
