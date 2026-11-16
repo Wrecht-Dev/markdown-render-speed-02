@@ -206,7 +206,7 @@ function tryLink(src, bracket, st, isImage) {
     const alt = plainText(r.label, st);
     return { html: `<img src="${encodeHref(r.href)}" alt="${escAttrNE(alt)}"${r.title !== null ? ` title="${escAttrNE(r.title)}"` : ''}>`, end: r.end };
   }
-  const inner = parseInline(r.label, { defs: st.defs, inLink: true, inA: st.inA });
+  const inner = parseInline(r.label, { defs: st.defs, inLink: true, doc: st.doc });
   return { html: `<a href="${encodeHref(r.href)}"${r.title !== null ? ` title="${escAttrNE(r.title)}"` : ''}>${inner}</a>`, end: r.end };
 }
 
@@ -299,8 +299,8 @@ function parseInline(src, st) {
         const raw = tm[0];
         if (!st.plain) pushHtml(raw); else flush();
         const name = (tm[1] || (tm[2] ? tm[2].slice(1) : '') || '').toLowerCase();
-        if (tm[1] && name === 'a' && !raw.endsWith('/>')) st.inA = true;
-        if (tm[2] && name === 'a') st.inA = false;
+        if (tm[1] && name === 'a' && /^<a\s+[^>]/i.test(raw)) st.doc.inA = true;
+        if (tm[2] && name === 'a') st.doc.inA = false;
         i += raw.length; continue;
       }
       txt += '&lt;'; i++; continue;
@@ -347,7 +347,7 @@ function parseInline(src, st) {
       atoms.push({ k: 'd', ch: c, len: run, olen: run, canOpen, canClose });
       i += run; continue;
     }
-    if (!st.inLink && !st.inA && (c === 'w' || c === 'h' || c === 'm' || c === 'x' || /[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(c))) {
+    if (!st.inLink && !st.doc.inA && (c === 'w' || c === 'h' || c === 'm' || c === 'x' || /[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(c))) {
       const prev = i > 0 ? src[i - 1] : undefined;
       const prevBad = prev !== undefined && /[a-zA-Z0-9_/.-]/.test(prev);
       if (!prevBad) {
@@ -451,7 +451,7 @@ function processDelims(atoms) {
 
 // Plain-text rendering of inline source (for image alt text).
 function plainText(src, st) {
-  return parseInline(src, { defs: st.defs, inLink: false, inA: false, plain: true });
+  return parseInline(src, { defs: st.defs, inLink: false, plain: true, doc: st.doc });
 }
 
 // ---------------- block ----------------
@@ -736,7 +736,7 @@ function tryHtmlBlock(lines, i, type7ok) {
   return { text: lines.slice(i, j).join('\n'), consumed: j - i };
 }
 
-function startsInterruptBlock(lines, j, defs) {
+function startsInterruptBlock(lines, j, defs, top = true) {
   const l = lines[j];
   if (matchFenceStart(l)) return true;
   if (matchATX(l)) return true;
@@ -745,8 +745,9 @@ function startsInterruptBlock(lines, j, defs) {
   if (tryHtmlBlock(lines, j, false)) return true;
   const lm = matchListMarker(l);
   if (lm && !lm.blankAfter) {
-    // list interrupts paragraph only if content non-empty; ordered must start at 1
-    if (!lm.ordered || lm.num === 1) {
+    // at top level an ordered list interrupts only if it starts at 1;
+    // inside containers (list items, quotes) any list can interrupt
+    if (!top || !lm.ordered || lm.num === 1) {
       if (lm.firstContent.trim() !== '') return true;
     }
   }
@@ -767,7 +768,7 @@ function parseList(lines, i, defs) {
     if (cur) {
       if (followedByItem && pendingBlanks > 0) loose = true;
       while (cur.lines.length && isBlank(cur.lines[cur.lines.length - 1])) cur.lines.pop();
-      const tokens = lexBlocks(cur.lines, defs);
+      const tokens = lexBlocks(cur.lines, defs, false, false);
       for (let k = 1; k < tokens.length; k++) if (tokens[k].sep) loose = true;
       items.push({ tokens });
       cur = null;
@@ -850,7 +851,7 @@ function canLazyTokens(tokens) {
   return false;
 }
 
-function lexBlocks(lines, defs, endsNl = false) {
+function lexBlocks(lines, defs, endsNl = false, top = true) {
   const tokens = [];
   let i = 0;
   let blankBefore = false;
@@ -910,7 +911,7 @@ function lexBlocks(lines, defs, endsNl = false) {
         const q = stripQuote(lines[j]);
         if (q !== null) { inner.push(q); j++; continue; }
         const cl = lines[j];
-        if (!isBlank(cl) && inner.length && !isBlank(inner[inner.length - 1]) && canLazyTokens(lexBlocks(inner, defs)) && !startsInterruptBlock(lines, j, defs)) {
+        if (!isBlank(cl) && inner.length && !isBlank(inner[inner.length - 1]) && canLazyTokens(lexBlocks(inner, defs, false, true)) && !startsInterruptBlock(lines, j, defs)) {
           if (/^ {0,3}(=+|-+)[ \t]*$/.test(cl)) {
             let chunkStart = 0;
             for (let k = inner.length - 1; k >= 0; k--) { if (isBlank(inner[k])) { chunkStart = k + 1; break; } }
@@ -923,7 +924,7 @@ function lexBlocks(lines, defs, endsNl = false) {
         }
         break;
       }
-      push({ t: 'quote', tokens: lexBlocks(inner, defs) });
+      push({ t: 'quote', tokens: lexBlocks(inner, defs, false, true) });
       i = j; continue;
     }
     // list
@@ -964,7 +965,7 @@ function lexBlocks(lines, defs, endsNl = false) {
           if (/^=+[ \t]*$/.test(s)) { heading = { depth: 1 }; j++; break; }
           if (/^-+[ \t]*$/.test(s)) { heading = { depth: 2 }; j++; break; }
         }
-        if (startsInterruptBlock(lines, j, defs)) break;
+        if (startsInterruptBlock(lines, j, defs, top)) break;
       }
       // table: this line is header, next line is delimiter
       if (j + 1 < lines.length) {
@@ -998,18 +999,18 @@ function lexBlocks(lines, defs, endsNl = false) {
   return tokens;
 }
 
-function renderTokens(tokens, defs) {
+function renderTokens(tokens, defs, doc) {
   let out = '';
-  for (const tok of tokens) out += renderToken(tok, defs, false);
+  for (const tok of tokens) out += renderToken(tok, defs, false, doc);
   return out;
 }
 
-function renderToken(tok, defs, tight) {
+function renderToken(tok, defs, tight, doc) {
   switch (tok.t) {
     case 'heading':
-      return `<h${tok.depth}>${parseInline(tok.text, { defs, inLink: false, inA: false })}</h${tok.depth}>\n`;
+      return `<h${tok.depth}>${parseInline(tok.text, { defs, inLink: false, doc })}</h${tok.depth}>\n`;
     case 'para': {
-      const inner = parseInline(tok.text, { defs, inLink: false, inA: false });
+      const inner = parseInline(tok.text, { defs, inLink: false, doc });
       return tight ? inner : `<p>${inner}</p>\n`;
     }
     case 'code':
@@ -1018,19 +1019,19 @@ function renderToken(tok, defs, tight) {
     case 'def': return '';
     case 'html': return tok.text;
     case 'quote':
-      return `<blockquote>\n${renderTokens(tok.tokens, defs)}</blockquote>\n`;
+      return `<blockquote>\n${renderTokens(tok.tokens, defs, doc)}</blockquote>\n`;
     case 'list': {
       const tag = tok.ordered ? 'ol' : 'ul';
       const startAttr = tok.ordered && tok.start !== 1 ? ` start="${tok.start}"` : '';
       let out = `<${tag}${startAttr}>\n`;
-      for (const item of tok.items) out += renderListItem(item, tok, defs);
+      for (const item of tok.items) out += renderListItem(item, tok, defs, doc);
       out += `</${tag}>\n`;
       return out;
     }
     case 'table': {
       let out = '<table>\n<thead>\n<tr>\n';
       tok.header.forEach((cell, k) => {
-        out += `<th${tok.aligns[k] ? ` align="${tok.aligns[k]}"` : ''}>${parseInline(cell, { defs, inLink: false, inA: false })}</th>\n`;
+        out += `<th${tok.aligns[k] ? ` align="${tok.aligns[k]}"` : ''}>${parseInline(cell, { defs, inLink: false, doc })}</th>\n`;
       });
       out += '</tr>\n</thead>\n';
       if (tok.rows.length) {
@@ -1039,7 +1040,7 @@ function renderToken(tok, defs, tight) {
           out += '<tr>\n';
           for (let k = 0; k < tok.header.length; k++) {
             const cell = row[k] ?? '';
-            out += `<td${tok.aligns[k] ? ` align="${tok.aligns[k]}"` : ''}>${parseInline(cell, { defs, inLink: false, inA: false })}</td>\n`;
+            out += `<td${tok.aligns[k] ? ` align="${tok.aligns[k]}"` : ''}>${parseInline(cell, { defs, inLink: false, doc })}</td>\n`;
           }
           out += '</tr>\n';
         }
@@ -1052,7 +1053,7 @@ function renderToken(tok, defs, tight) {
   return '';
 }
 
-function renderListItem(item, list, defs) {
+function renderListItem(item, list, defs, doc) {
   const tokens = item.tokens;
   let task = null;
   if (tokens.length && tokens[0].t === 'para') {
@@ -1064,7 +1065,7 @@ function renderListItem(item, list, defs) {
   }
   let content = '';
   tokens.forEach((tok, idx) => {
-    let r = renderToken(tok, defs, !list.loose);
+    let r = renderToken(tok, defs, !list.loose, doc);
     if (idx === 0 && task !== null) {
       const box = `<input ${task ? 'checked="" ' : ''}disabled="" type="checkbox"> `;
       if (!list.loose && tok.t === 'para') r = box + r;
@@ -1083,5 +1084,5 @@ export function parse(markdown) {
   const lines = src.split('\n');
   if (lines.length && lines[lines.length - 1] === '') lines.pop();
   const tokens = lexBlocks(lines, defs, endsNl);
-  return renderTokens(tokens, defs);
+  return renderTokens(tokens, defs, { inA: false });
 }
