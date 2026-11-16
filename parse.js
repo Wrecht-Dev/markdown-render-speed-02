@@ -41,24 +41,28 @@ const BARE_EMAIL_RE = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-
 
 // Find the index just past the bracket matching src[start] === '['.
 function scanBracket(src, start) {
-  let depth = 0, i = start, inSpan = false;
+  let depth = 0, i = start;
   while (i < src.length) {
     const c = src[i];
     if (c === '\\') { i += 2; continue; }
     if (c === '`') {
       let n = 0; while (src[i + n] === '`') n++;
-      inSpan = !inSpan;
-      i += n; continue;
+      const close = findCodeClose(src, i + n, n);
+      if (close >= 0) { i = close + n; continue; }
+      const nxt = src.indexOf('`', i + n);
+      if (nxt < 0) return -1;
+      let m = 0; while (src[nxt + m] === '`') m++;
+      i = nxt + m; continue;
     }
-    if (!inSpan && c === '<') {
+    if (c === '<') {
       const am = SCHEME_AUTOLINK_RE.exec(src.slice(i, i + 300)) || EMAIL_AUTOLINK_RE.exec(src.slice(i));
       if (am) { i += am[0].length; continue; }
       const tm = TAG_RE.exec(src.slice(i));
       if (tm) { i += tm[0].length; continue; }
       i++; continue;
     }
-    if (!inSpan && c === '[') depth++;
-    else if (!inSpan && c === ']') { depth--; if (depth === 0) return i; }
+    if (c === '[') depth++;
+    else if (c === ']') { depth--; if (depth === 0) return i; }
     i++;
   }
   return -1;
@@ -352,13 +356,13 @@ function parseInline(src, st) {
       if (!prevBad) {
         const rest = src.slice(i);
         let m = null, href = null, text = null;
-        if (/^www\./i.test(rest) || /^https?:\/\//i.test(rest)) {
+        if (/^www\./.test(rest) || /^https?:\/\//i.test(rest)) {
           m = BARE_URL_RE.exec(rest);
           if (m) {
             let cand = m[0];
             // cap at link-forming '[' (BARE_URL_RE already excludes brackets)
             cand = trimAutolink(cand);
-            if (cand.length >= (/^www\./i.test(cand) ? 5 : 8)) { text = cand; href = /^www\./i.test(cand) ? 'http://' + cand : cand; }
+            if (cand.length >= (/^www\./.test(cand) ? 5 : 8)) { text = cand; href = /^www\./.test(cand) ? 'http://' + cand : cand; }
             else m = null;
           }
         }
