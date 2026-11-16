@@ -15,10 +15,33 @@ function isSpace(ch) {
   return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' ||
     ch === '\f' || ch === '\v' || ch === ' ' || ch === '\uFEFF';
 }
+function isWsAscii(ch) {
+  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' ||
+    ch === '\f' || ch === '\v';
+}
+// punctuation for flanking purposes: ASCII punctuation plus any
+// non-alphanumeric, non-space character (symbols like £, € count)
+function isFlankPunct(ch) {
+  if (ch === undefined) return false;
+  if (isPunct(ch)) return true;
+  return ch.charCodeAt(0) > 127 && !isAlnum(ch) && !isSpace(ch);
+}
+// Unicode full case folding for reference labels (common folds)
+function foldLabel(s) {
+  return s.toLowerCase()
+    .replace(/ß/g, 'ss').replace(/ſ/g, 's')
+    .replace(/ﬀ/g, 'ff').replace(/ﬁ/g, 'fi').replace(/ﬂ/g, 'fl')
+    .replace(/ﬃ/g, 'ffi').replace(/ﬄ/g, 'ffl')
+    .replace(/ﬅ/g, 'st').replace(/ﬆ/g, 'st').replace(/µ/g, 'μ');
+}
+const UNICODE_LETTER = /[\p{L}\p{N}\p{M}]/u;
 function isAlnum(ch) {
   if (ch === undefined) return false;
   const c = ch.charCodeAt(0);
-  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c > 127;
+  if (c < 128) {
+    return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+  }
+  return UNICODE_LETTER.test(ch);
 }
 
 // Escape text-node content the way an HTML serializer for marked does:
@@ -112,7 +135,7 @@ function decodeRefsRaw(s) {
 // characters and leaves the rest alone.
 function cleanUrl(href) {
   try {
-    href = encodeURI(href).replace(/%25/g, '%');
+    href = encodeURI(href).replace(/%25/g, '%').replace(/"/g, '%22');
   } catch {
     return null;
   }
@@ -120,8 +143,9 @@ function cleanUrl(href) {
 }
 
 function normalizeLabel(s) {
-  return s.replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, '$1')
-    .replace(/[\t\n\v\f\r ]+/g, ' ').replace(/^ | $/g, '').toLowerCase();
+  // labels keep their backslash escapes; matching is on the raw text,
+  // whitespace-collapsed and case-folded
+  return foldLabel(s.replace(/[\t\n\v\f\r ]+/g, ' ').replace(/^ | $/g, ''));
 }
 
 // ---------------------------------------------------------------- inline
@@ -194,7 +218,7 @@ class InlineParser {
     this.text = '';   // pending raw text buffer
     this.parseLoop();
     this.flushText();
-    this.processEmphasis(null);
+    this.processEmphasis(-1);
     return renderNodes(this.nodes);
   }
 
@@ -230,17 +254,20 @@ class InlineParser {
       if (c === ']') { if (this.doCloseBracket()) continue; this.text += ']'; this.pos++; continue; }
       if (c === '*' || c === '_' || c === '~') { this.doDelimRun(c); continue; }
       if (c === '\n') {
-        // hard break: two spaces or more before the newline
+        // hard break: two spaces or more before the newline; the next
+        // line's leading spaces are dropped after a hard break
         let sp = 0;
         let t = this.text;
         while (sp < t.length && t[t.length - 1 - sp] === ' ') sp++;
         if (sp >= 2) {
           this.text = t.slice(0, t.length - sp);
           this.pushRaw('<br>');
+          this.pos++;
+          while (s[this.pos] === ' ' || s[this.pos] === '\t') this.pos++;
         } else {
           this.pushRaw('\n');
+          this.pos++;
         }
-        this.pos++;
         continue;
       }
       // plain text run: consume until the next special character, watching
@@ -332,7 +359,12 @@ class InlineParser {
   doBackslash() {
     const s = this.s, i = this.pos;
     const nx = s[i + 1];
-    if (nx === '\n') { this.pushRaw('<br>'); this.pos += 2; return; }
+    if (nx === '\n') {
+      this.pushRaw('<br>');
+      this.pos += 2;
+      while (s[this.pos] === ' ' || s[this.pos] === '\t') this.pos++;
+      return;
+    }
     if (nx !== undefined && isPunct(nx)) { this.text += nx; this.pos += 2; return; }
     this.text += '\\'; this.pos++;
   }
@@ -388,6 +420,8 @@ class InlineParser {
       }
     }
     if (rest.startsWith('<!--')) {
+      if (rest[4] === '>') { this.pushRaw(rest.slice(0, 5)); this.pos += 5; return true; }
+      if (rest[4] === '-' && rest[5] === '>') { this.pushRaw(rest.slice(0, 6)); this.pos += 6; return true; }
       const end = rest.indexOf('-->', 4);
       if (end !== -1) { this.pushRaw(rest.slice(0, end + 3)); this.pos += end + 3; return true; }
     }
@@ -418,14 +452,16 @@ class InlineParser {
   // ']' at this.pos. Try to form a link or image. Returns true if consumed.
   doCloseBracket() {
     const s = this.s;
-    // find nearest active '[' opener
+    // a ']' pairs with the nearest '[' opener and pops it, whether or
+    // not a link ends up forming
     let oi = -1;
     for (let d = this.delims.length - 1; d >= 0; d--) {
-      const dl = this.delims[d];
-      if (dl.ch === '[' && dl.active) { oi = d; break; }
+      if (this.delims[d].ch === '[') { oi = d; break; }
     }
     if (oi === -1) return false;
     const opener = this.delims[oi];
+    this.delims.splice(oi, 1);
+    if (!opener.active) return false;
     const nodeIdx = this.nodes.indexOf(opener);
     const after = this.pos + 1; // just past ']'
     const linkTextEnd = this.pos;
@@ -461,19 +497,17 @@ class InlineParser {
 
     // success: first settle emphasis inside the bracket text, then wrap
     this.flushText();
-    this.processEmphasis(opener);
+    this.processEmphasis(oi - 1);
     const nIdx2 = this.nodes.indexOf(opener);
     const inner = this.nodes.splice(nIdx2 + 1);
     this.nodes.splice(nIdx2, 1); // remove opener
     // delim entries above the opener now live inside the link; retire them
-    const oiNow = this.delims.indexOf(opener);
-    this.delims = this.delims.filter((d, ix) => ix < oiNow);
+    this.delims = this.delims.slice(0, oi);
     let node;
     if (opener.image) {
       const alt = renderPlainText(inner);
       const clean = cleanUrl(dest);
-      node = { k: 'raw', s: '<img src="' + escAttr(clean === null ? dest : clean) + '" alt="' + escAttr(alt) + '"' +
-        (title !== null ? ' title="' + escAttr(title) + '"' : '') + '>' };
+      node = { k: 'img', src: clean === null ? dest : clean, title, alt };
       this.nodes.push(node);
     } else {
       const clean = cleanUrl(dest);
@@ -521,7 +555,7 @@ class InlineParser {
     const s = this.s, n = this.n;
     if (s[i] !== '(') return null;
     let j = i + 1;
-    while (j < n && isSpace(s[j])) j++;
+    while (j < n && isWsAscii(s[j])) j++;
     let href = '';
     if (s[j] === '<') {
       // angle destination: no newlines, no unescaped < >
@@ -546,7 +580,7 @@ class InlineParser {
           if (depth === 0) break;
           depth--; href += c; j++; continue;
         }
-        if (isSpace(c) || c === '\x00') break;
+        if (isWsAscii(c) || c === '\x00') break;
         if (c.charCodeAt(0) < 0x20) break;
         href += c; j++;
       }
@@ -556,7 +590,7 @@ class InlineParser {
     // optional title, separated by whitespace
     let k = j;
     let sawSpace = false;
-    while (k < n && isSpace(s[k])) { sawSpace = true; k++; }
+    while (k < n && isWsAscii(s[k])) { sawSpace = true; k++; }
     let title = null;
     if (sawSpace && (s[k] === '"' || s[k] === "'" || s[k] === '(')) {
       const open = s[k];
@@ -572,10 +606,10 @@ class InlineParser {
       if (!ok) return null;
       title = decodeRefsRaw(t);
       k = q + 1;
-      while (k < n && isSpace(s[k])) k++;
+      while (k < n && isWsAscii(s[k])) k++;
     } else {
       k = j;
-      while (k < n && isSpace(s[k])) k++;
+      while (k < n && isWsAscii(s[k])) k++;
     }
     if (s[k] !== ')') return null;
     return { href, title, end: k + 1 };
@@ -588,7 +622,7 @@ class InlineParser {
     while (s[i + run] === c) run++;
     const before = i === 0 ? '\n' : s[i - 1];
     const after = i + run >= n ? '\n' : s[i + run];
-    const beforePunct = isPunct(before), afterPunct = isPunct(after);
+    const beforePunct = isFlankPunct(before), afterPunct = isFlankPunct(after);
     const beforeSpace = isSpace(before), afterSpace = isSpace(after);
     const leftFlank = !afterSpace && (!afterPunct || beforeSpace || beforePunct);
     const rightFlank = !beforeSpace && (!beforePunct || afterSpace || afterPunct);
@@ -612,13 +646,10 @@ class InlineParser {
     this.pos = i + run;
   }
 
-  // Standard delimiter-stack emphasis processing. `bottom` is the delim
-  // node to stop at (exclusive), or null for the whole stack.
-  processEmphasis(bottom) {
-    let closerIdx = 0;
-    // find first potential closer above bottom
+  // Standard delimiter-stack emphasis processing. `bi` is the stack
+  // index to stop at (exclusive); -1 processes the whole stack.
+  processEmphasis(bi) {
     const stack = this.delims;
-    let bi = bottom ? stack.indexOf(bottom) : -1;
     let ci = bi + 1;
     while (ci < stack.length) {
       const closer = stack[ci];
@@ -668,10 +699,9 @@ class InlineParser {
           if (d < ci) ci--;
         }
       }
-      bi = bottom ? stack.indexOf(bottom) : -1;
     }
-    // any leftover delims above bottom become plain text (handled at render)
-    if (bottom === null) {
+    // any leftover delims above bottom become plain text (rendered as-is)
+    if (bi === -1) {
       this.delims = this.delims.filter(d => d.ch === '[');
     }
   }
@@ -686,7 +716,10 @@ function renderNode(nd) {
   switch (nd.k) {
     case 'text': return escText(nd.s);
     case 'raw': return nd.s;
-    case 'delim': return nd.ch.repeat(nd.n);
+    case 'delim': return nd.ch === '[' ? (nd.image ? '![' : '[') : nd.ch.repeat(nd.n);
+    case 'img':
+      return '<img src="' + escAttr(nd.src) + '" alt="' + escAttr(nd.alt) + '"' +
+        (nd.title !== null && nd.title !== undefined ? ' title="' + escAttr(nd.title) + '"' : '') + '>';
     case 'wrap': {
       const inner = renderNodes(nd.children);
       if (nd.tag === 'a') {
@@ -704,7 +737,8 @@ function renderPlainText(nodes) {
   let out = '';
   for (const nd of nodes) {
     if (nd.k === 'text') out += nd.s;
-    else if (nd.k === 'delim') out += nd.ch.repeat(nd.n);
+    else if (nd.k === 'delim') out += nd.ch === '[' ? (nd.image ? '![' : '[') : nd.ch.repeat(nd.n);
+    else if (nd.k === 'img') out += nd.alt;
     else if (nd.k === 'wrap') out += renderPlainText(nd.children);
     else if (nd.k === 'raw') {
       // code spans carry finished html; recover their text roughly
@@ -872,8 +906,6 @@ class BlockParser {
         for (let j = 0; j < item.children.length - 1; j++) {
           if (endsBlank(item.children[j])) b.loose = true;
         }
-        // an item whose last child ends blank and item has a next sibling
-        // is covered above; also a child ending blank followed by sibling
       }
       for (const item of items) item.parentList = b;
     }
@@ -1024,6 +1056,7 @@ class BlockParser {
       for (let x = this.open.length - 1; x >= 1; x--) {
         const b = this.open[x];
         if (b.type === 'item' && b.emptyStart && b.children.length === 0) {
+          b.lastLineBlank = true;
           this.closeDownTo(x - 1);
           break;
         }
@@ -1051,6 +1084,8 @@ class BlockParser {
         const rest = curRest(cur);
         const m = ind <= 3 && /^(`{3,}|~{3,})[ \t]*$/.exec(rest.replace(/^[ \t]+/, ''));
         if (m && m[1][0] === d.fenceChar && m[1].length >= d.fenceLen) {
+          // a closing fence drops one trailing blank line of content
+          if (d.text.endsWith('\n\n')) d.text = d.text.slice(0, -1);
           this.closeDownTo(this.open.length - 2);
           this.prevBlank = false;
           return;
@@ -1117,24 +1152,27 @@ class BlockParser {
     if (para.lines.length === 1 && tryTable(para.lines[0], firstNon)) return true;
     const lm = listMarkerAt(cur);
     if (lm) {
-      // a marker that continues an enclosing list always interrupts
+      // a marker that continues an enclosing list always interrupts;
+      // inside an item, any marker with content interrupts too (it ends
+      // the item and starts a new list or item)
+      let inItem = false;
       for (let p = para.parent; p; p = p.parent) {
         if (p.type === 'list' && sameListType(p, lm)) return true;
+        if (p.type === 'item') inItem = true;
         if (p.type === 'doc') break;
       }
+      if (inItem && lm.contentNonEmpty) return true;
       if (lm.contentNonEmpty && (!lm.ordered || lm.num === 1)) return true;
     }
     return false;
   }
 
   markBlank() {
-    // record that the current deepest container chain saw a blank line
-    for (let i = this.open.length - 1; i >= 1; i--) {
-      const b = this.open[i];
-      if (b.type === 'list' || b.type === 'item' || b.type === 'quote') {
-        b.lastLineBlank = true;
-      }
-    }
+    // a blank line marks the deepest open container it falls in (a
+    // paragraph in it was already flagged by the caller); blanks inside
+    // a blockquote mark nothing outside the quote
+    const d = this.open[this.open.length - 1];
+    if (d && (d.type === 'item' || d.type === 'list')) d.lastLineBlank = true;
   }
 
   // Process new block starts at the cursor until the line is consumed.
@@ -1375,12 +1413,11 @@ class BlockParser {
 }
 
 function endsBlank(b) {
-  if (b.lastLineBlank) {
-    if (b.type === 'list' || b.type === 'item') {
-      const last = b.children[b.children.length - 1];
-      return last ? endsBlank(last) : false;
-    }
-    return true;
+  // does this block end with a blank line? (a blockquote never reports
+  // the blanks inside it to its parent)
+  if (b.lastLineBlank) return true;
+  if ((b.type === 'item' || b.type === 'list') && b.children.length) {
+    return endsBlank(b.children[b.children.length - 1]);
   }
   return false;
 }
@@ -1454,11 +1491,11 @@ function parseOneDef(text, pos) {
   let sp = 0;
   while (text[i] === ' ' && sp < 3) { i++; sp++; }
   if (text[i] !== '[') return null;
-  // label
+  // label (escape sequences stay raw in the stored label)
   let j = i + 1, label = '', ok = false;
   while (j < n) {
     const c = text[j];
-    if (c === '\\' && isPunct(text[j + 1])) { label += text[j + 1]; j += 2; continue; }
+    if (c === '\\' && isPunct(text[j + 1])) { label += text.slice(j, j + 2); j += 2; continue; }
     if (c === '[') return null;
     if (c === ']') { ok = true; break; }
     label += c; j++;
@@ -1495,7 +1532,7 @@ function parseOneDef(text, pos) {
         if (depth === 0) break;
         depth--; href += c; j++; continue;
       }
-      if (isSpace(c)) break;
+      if (isWsAscii(c)) break;
       if (c.charCodeAt(0) < 0x20) break;
       href += c; j++;
     }
@@ -1589,7 +1626,7 @@ function splitCells(line) {
           j += r2;
         } else j++;
       }
-      if (found !== -1) { cur += line.slice(i, found + run); i = found + run; continue; }
+      if (found !== -1) { cur += line.slice(i, found + run).replace(/\\\|/g, '|'); i = found + run; continue; }
       cur += line.slice(i, i + run); i += run; continue;
     }
     if (c === '|') { cells.push(cur); cur = ''; i++; continue; }
