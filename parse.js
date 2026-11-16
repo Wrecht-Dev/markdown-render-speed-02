@@ -534,10 +534,10 @@ function emGlued(atoms, ci) {
 
 function processDelims(atoms) {
   // CommonMark-style delimiter processing.
-  const poisonBefore = new Array(atoms.length).fill(false);
-  const codeAfter = new Array(atoms.length).fill(false);
-  { let seen = false; for (let i = 0; i < atoms.length; i++) { poisonBefore[i] = seen; if (atoms[i].poison) seen = true; } }
-  { let seen = false; for (let i = atoms.length - 1; i >= 0; i--) { codeAfter[i] = seen; if (atoms[i].cs) seen = true; } }
+  const anyPoison = atoms.some(a => a.poison);
+  const anyCode = atoms.some(a => a.cs);
+  const poisonBefore = (j) => { for (let t = 0; t < j; t++) if (atoms[t].poison) return true; return false; };
+  const codeAfter = (j) => { for (let t = j + 1; t < atoms.length; t++) if (atoms[t].cs) return true; return false; };
   let ci = 0;
   while (ci < atoms.length) {
     const closer = atoms[ci];
@@ -551,7 +551,7 @@ function processDelims(atoms) {
       const u = (a.len >= 2 && closer.len >= 2) ? 2 : 1;
       if (u === 1 && closer.ch === '*' && emPoisoned(atoms, j, ci)) continue;
       if (u === 1 && closer.ch === '*' && a.len >= 2 && emGlued(atoms, ci)) continue;
-      if (poisonBefore[j] && codeAfter[ci]) continue;
+      if (anyPoison && anyCode && poisonBefore(j) && codeAfter(ci)) continue;
       opener = a; oi = j; break;
     }
     if (!opener) { ci++; continue; }
