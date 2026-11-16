@@ -256,10 +256,17 @@ function trimAutolink(s) {
       if (em) { s = s.slice(0, s.length - em[0].length); continue; }
     }
     s = s.replace(/[?!.,:*_~';]+$/, '');
-    // unbalanced close parens
-    let open = 0, close = 0;
-    for (const ch of s) { if (ch === '(') open++; else if (ch === ')') close++; }
-    while (s.endsWith(')') && close > open) { s = s.slice(0, -1); close--; }
+    // trailing ')' that are unmatched under stack matching are dropped
+    for (;;) {
+      if (!s.endsWith(')')) break;
+      let depth = 0, unmatched = false;
+      for (let k = 0; k < s.length; k++) {
+        if (s[k] === '(') depth++;
+        else if (s[k] === ')') { if (depth === 0) { if (k === s.length - 1) unmatched = true; } else depth--; }
+      }
+      if (!unmatched) break;
+      s = s.slice(0, -1);
+    }
   } while (s !== prev);
   return s;
 }
