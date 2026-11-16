@@ -1050,7 +1050,9 @@ function lexBlocks(lines, defs, endsNl = false, top = true) {
       if (plines.length) push({ t: 'para', text: plines.join('\n') });
       const rows = [];
       let rj = table.startLine + 2;
-      while (rj < lines.length && !isBlank(lines[rj]) && !startsInterruptBlock(lines, rj, defs)) {
+      while (rj < lines.length) {
+        if (lines[rj] === '\t') { rows.push(['']); rj++; continue; }
+        if (isBlank(lines[rj]) || startsInterruptBlock(lines, rj, defs)) break;
         rows.push(splitRow(lines[rj]));
         rj++;
       }
