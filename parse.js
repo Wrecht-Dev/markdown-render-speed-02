@@ -306,11 +306,70 @@ class InlineParser {
     this.pos = i;
   }
 
+  // If the nearest open bracket will form a link at its closing ']',
+  // an autolink starting here must not consume that ']' (in marked the
+  // label is lexed as its own unit once the link token matches).
+  // Returns the index of that ']' or -1.
+  autolinkCap(i) {
+    const s = this.s, n = this.n;
+    let opener = null;
+    for (let d = this.delims.length - 1; d >= 0; d--) {
+      if (this.delims[d].ch === '[') { opener = this.delims[d]; break; }
+    }
+    if (!opener || !opener.active) return -1;
+    let depth = 0, j = i;
+    while (j < n) {
+      const c = s[j];
+      if (c === '\\') { j += 2; continue; }
+      if (c === '`') {
+        let run = 0;
+        while (s[j + run] === '`') run++;
+        let k = j + run, closed = -1;
+        while (k < n) {
+          if (s[k] === '`') {
+            let r2 = 0;
+            while (s[k + r2] === '`') r2++;
+            if (r2 === run) { closed = k; break; }
+            k += r2;
+          } else k++;
+        }
+        if (closed === -1) { j += run; continue; }
+        j = closed + run;
+        continue;
+      }
+      if (c === '[') depth++;
+      else if (c === ']') {
+        if (depth === 0) {
+          return this.linkFormsAt(opener, j) ? j : -1;
+        }
+        depth--;
+      }
+      j++;
+    }
+    return -1;
+  }
+
+  // Would the bracket opened by `opener` form a link at s[closeIdx]===']'?
+  linkFormsAt(opener, closeIdx) {
+    const s = this.s;
+    const after = closeIdx + 1;
+    if (this.parseLinkTail(after)) return true;
+    let labelText;
+    if (s[after] === '[') {
+      const lab = this.parseLinkLabel(after);
+      if (lab && lab.label !== '') labelText = lab.label;
+    }
+    if (labelText === undefined) labelText = this.sourceTextBetween(opener, closeIdx);
+    return this.refs.has(normalizeLabel(labelText));
+  }
+
   // Returns {len, html} for an extended autolink at position i, or null.
   tryExtendedAutolink(i) {
     if (this.state.inLink) return null;
     const s = this.s;
-    const rest = s.slice(i, Math.min(this.n, i + 500));
+    let rest = s.slice(i, Math.min(this.n, i + 500));
+    const cap = this.autolinkCap(i);
+    if (cap !== -1) rest = s.slice(i, cap);
     let m = null, href = null, isWww = false;
     if (rest.startsWith('www.')) { m = WWW_RE.exec(rest); isWww = true; }
     else if (/^https?:\/\//i.test(rest)) m = HTTP_RE.exec(rest);
