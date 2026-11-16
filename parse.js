@@ -165,7 +165,7 @@ const EMAILLINK_RE = /^<([a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z
 
 // GFM extended autolink pieces (used while scanning plain text).
 const WWW_RE = /^www\.[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+(?:[^\s<]*)?/;
-const HTTP_RE = /^https?:\/\/[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*(?:[^\s<]*)?/;
+const HTTP_RE = /^https?:\/\/[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*(?:[^\s<]*)?/i;
 const EMAIL_RE = /^[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+/;
 
 // Trim an extended autolink per GFM rules: drop trailing punctuation,
@@ -205,8 +205,11 @@ function autolinkBoundary(s, i) {
 }
 
 class InlineParser {
-  constructor(refs) {
+  constructor(refs, state) {
     this.refs = refs; // Map normalized label -> {href, title}
+    // document-wide lexer state shared across blocks: an unclosed <a>
+    // tag suppresses extended autolinks until a </a> appears
+    this.state = state || { inLink: false };
   }
 
   parse(src) {
@@ -290,9 +293,9 @@ class InlineParser {
         const link = this.tryExtendedAutolink(i);
         if (link) {
           this.text += buf;
-          this.pushRaw(link.html);
+          this.flushText();
+          this.nodes.push({ k: 'autolink', s: link.html, text: link.text });
           this.pos = i + link.len;
-          // any text consumed by the match beyond the url (none) — done
           return;
         }
       }
@@ -305,18 +308,19 @@ class InlineParser {
 
   // Returns {len, html} for an extended autolink at position i, or null.
   tryExtendedAutolink(i) {
+    if (this.state.inLink) return null;
     const s = this.s;
     const rest = s.slice(i, Math.min(this.n, i + 500));
     let m = null, href = null, isWww = false;
     if (rest.startsWith('www.')) { m = WWW_RE.exec(rest); isWww = true; }
-    else if (rest.startsWith('http://') || rest.startsWith('https://')) m = HTTP_RE.exec(rest);
+    else if (/^https?:\/\//i.test(rest)) m = HTTP_RE.exec(rest);
     if (m) {
       let url = trimAutolink(m[0]);
       if (url === 'www.' || url.endsWith('://')) return null;
       href = isWww ? 'http://' + url : url;
       const clean = cleanUrl(href);
       if (clean === null) return null;
-      return { len: url.length, html: '<a href="' + escAttr(clean) + '">' + escText(url) + '</a>' };
+      return { len: url.length, text: url, html: '<a href="' + escAttr(clean) + '">' + escText(url) + '</a>' };
     }
     m = EMAIL_RE.exec(rest);
     if (m) {
@@ -326,7 +330,7 @@ class InlineParser {
       if (after === '-' || after === '_') return null;
       const clean = cleanUrl('mailto:' + url);
       if (clean === null) return null;
-      return { len: url.length, html: '<a href="' + escAttr(clean) + '">' + escText(url) + '</a>' };
+      return { len: url.length, text: url, html: '<a href="' + escAttr(clean) + '">' + escText(url) + '</a>' };
     }
     // mailto: / xmpp: style — whole "scheme:local@domain" as one link
     m = /^(?:mailto|xmpp):/.exec(rest);
@@ -350,7 +354,7 @@ class InlineParser {
         }
         const clean = cleanUrl(url);
         if (clean === null) return null;
-        return { len: url.length, html: '<a href="' + escAttr(clean) + '">' + escText(url) + '</a>' };
+        return { len: url.length, text: url, html: '<a href="' + escAttr(clean) + '">' + escText(url) + '</a>' };
       }
     }
     return null;
@@ -438,13 +442,19 @@ class InlineParser {
       if (end !== -1) { this.pushRaw(rest.slice(0, end + 1)); this.pos += end + 1; return true; }
     }
     m = OPEN_TAG.exec(rest) || CLOSE_TAG.exec(rest);
-    if (m) { this.pushRaw(m[0]); this.pos += m[0].length; return true; }
+    if (m) {
+      this.pushRaw(m[0]);
+      this.pos += m[0].length;
+      if (/^<a\s/i.test(m[0])) this.state.inLink = true;
+      else if (/^<\/a\s*>/i.test(m[0])) this.state.inLink = false;
+      return true;
+    }
     return false;
   }
 
   pushBracket(isImage) {
     this.flushText();
-    const node = { k: 'delim', ch: '[', n: 1, canOpen: true, canClose: false, active: true, image: isImage, srcPos: this.pos };
+    const node = { k: 'delim', ch: '[', n: 1, canOpen: true, canClose: false, active: true, image: isImage, srcPos: this.pos, stateAtOpen: this.state.inLink };
     this.nodes.push(node);
     this.delims.push(node);
   }
@@ -495,7 +505,10 @@ class InlineParser {
       dest = ref.href; title = ref.title;
     }
 
-    // success: first settle emphasis inside the bracket text, then wrap
+    // success: tag tokens inside the label were lexed as label text, so
+    // their effect on the shared inLink state is rolled back
+    this.state.inLink = opener.stateAtOpen;
+    // first settle emphasis inside the bracket text, then wrap
     this.flushText();
     this.processEmphasis(oi - 1);
     const nIdx2 = this.nodes.indexOf(opener);
@@ -510,6 +523,7 @@ class InlineParser {
       node = { k: 'img', src: clean === null ? dest : clean, title, alt };
       this.nodes.push(node);
     } else {
+      unlinkAutolinks(inner);
       const clean = cleanUrl(dest);
       node = { k: 'wrap', tag: 'a', href: clean === null ? dest : clean, title, children: inner };
       this.nodes.push(node);
@@ -707,6 +721,16 @@ class InlineParser {
   }
 }
 
+// Extended autolinks do not form inside a link's label: when a link
+// forms, any autolink nodes captured in its label revert to plain text.
+function unlinkAutolinks(nodes) {
+  for (let i = 0; i < nodes.length; i++) {
+    const nd = nodes[i];
+    if (nd.k === 'autolink') nodes[i] = { k: 'text', s: nd.text };
+    else if (nd.children) unlinkAutolinks(nd.children);
+  }
+}
+
 function renderNodes(nodes) {
   let out = '';
   for (const nd of nodes) out += renderNode(nd);
@@ -716,6 +740,7 @@ function renderNode(nd) {
   switch (nd.k) {
     case 'text': return escText(nd.s);
     case 'raw': return nd.s;
+    case 'autolink': return nd.s;
     case 'delim': return nd.ch === '[' ? (nd.image ? '![' : '[') : nd.ch.repeat(nd.n);
     case 'img':
       return '<img src="' + escAttr(nd.src) + '" alt="' + escAttr(nd.alt) + '"' +
@@ -739,6 +764,7 @@ function renderPlainText(nodes) {
     if (nd.k === 'text') out += nd.s;
     else if (nd.k === 'delim') out += nd.ch === '[' ? (nd.image ? '![' : '[') : nd.ch.repeat(nd.n);
     else if (nd.k === 'img') out += nd.alt;
+    else if (nd.k === 'autolink') out += nd.text;
     else if (nd.k === 'wrap') out += renderPlainText(nd.children);
     else if (nd.k === 'raw') {
       // code spans carry finished html; recover their text roughly
@@ -763,6 +789,26 @@ function curPeek(cur) {
 }
 function curRest(cur) {
   return ' '.repeat(cur.partial) + cur.line.slice(cur.off);
+}
+// The rest of the line with tabs in its leading whitespace run expanded
+// to spaces at absolute tab stops. Marked's container dedent behaves
+// this way: once a line has been carried through a blockquote or list
+// item frame, a tab in the remaining leading whitespace materializes as
+// spaces; at the top level (no frame) tabs stay raw.
+function curRestX(cur) {
+  let out = ' '.repeat(cur.partial);
+  let col = cur.col + cur.partial;
+  const line = cur.line;
+  let off = cur.off;
+  while (off < line.length) {
+    const ch = line[off];
+    if (ch === ' ') { out += ' '; col++; off++; }
+    else if (ch === '\t') {
+      const w = 4 - (col % 4);
+      out += ' '.repeat(w); col += w; off++;
+    } else break;
+  }
+  return out + line.slice(off);
 }
 function curAdvance(cur, cols) {
   let n = cols;
@@ -818,8 +864,9 @@ function newBlock(type, parent) {
   if (parent) {
     // looseness: a block that starts right after a blank line, inside a
     // list item that already has a block, or a non-first item that starts
-    // right after a blank line, makes the containing list loose
-    if (CURPARSER && CURPARSER.prevBlank) {
+    // right after a blank line, makes the containing list loose — unless
+    // the blank line fell inside a blockquote that this block is not in
+    if (CURPARSER && CURPARSER.prevBlank && CURPARSER.blankChainOk(parent)) {
       if (type === 'item' && parent.type === 'list' && parent.children.length >= 1) {
         parent.loose = true;
       } else if (parent.type === 'item' && parent.children.length >= 1 &&
@@ -897,6 +944,18 @@ class BlockParser {
   }
 
   deepest() { return this.open[this.open.length - 1]; }
+
+  // Was the last blank line "visible" from this parent block? It is,
+  // unless it fell inside a blockquote that does not contain the parent.
+  blankChainOk(parent) {
+    const bq = this.blankQuotes || [];
+    for (const q of bq) {
+      let p = parent, inside = false;
+      while (p) { if (p === q) { inside = true; break; } p = p.parent; }
+      if (!inside) return false;
+    }
+    return true;
+  }
 
   closeDownTo(idx) {
     while (this.open.length - 1 > idx) {
@@ -1004,7 +1063,7 @@ class BlockParser {
     if (blank && !containerFailed && deep.type === 'para' &&
         curRest(cur).length > 0 &&
         open.slice(1, matched + 1).some(b => b.type === 'quote')) {
-      deep.lines.push(curRest(cur));
+      deep.lines.push(curRestX(cur));
       this.prevBlank = false;
       return;
     }
@@ -1024,7 +1083,7 @@ class BlockParser {
         if (curIndent(cur) >= 4) {
           const c2 = { ...cur };
           curAdvance(c2, 4);
-          d.text += curRest(c2) + '\n';
+          d.text += (matched >= 1 ? curRestX(c2) : curRest(c2)) + '\n';
         } else {
           d.text += '\n';
         }
@@ -1034,7 +1093,7 @@ class BlockParser {
       if (d.type === 'code' && d.fenced) {
         const c2 = { ...cur };
         curSkipSpaces(c2, d.fenceIndent);
-        d.text += curRest(c2) + '\n';
+        d.text += (matched >= 1 ? curRestX(c2) : curRest(c2)) + '\n';
         this.prevBlank = true;
         return;
       }
@@ -1077,9 +1136,11 @@ class BlockParser {
         }
         this.markBlank();
       }
-      // a blank line that falls inside a blockquote does not count as a
-      // block separator for list looseness
-      this.prevBlank = !this.open.some(b => b.type === 'quote');
+      // remember which blockquotes the blank line fell inside, for the
+      // looseness rule (a blank inside a quote separates blocks only
+      // within that same quote)
+      this.blankQuotes = this.open.filter(b => b.type === 'quote');
+      this.prevBlank = true;
       return;
     }
 
@@ -1102,21 +1163,21 @@ class BlockParser {
         // strip up to fenceIndent columns
         let c2 = { ...cur };
         curSkipSpaces(c2, d.fenceIndent);
-        d.text += curRest(c2) + '\n';
+        d.text += (matched >= 1 ? curRestX(c2) : curRest(c2)) + '\n';
         this.prevBlank = false;
         return;
       }
       // indented code needs 4 more columns
       if (curIndent(cur) >= 4) {
         curAdvance(cur, 4);
-        d.text += curRest(cur) + '\n';
+        d.text += (matched >= 1 ? curRestX(cur) : curRest(cur)) + '\n';
         this.prevBlank = false;
         return;
       }
       this.closeDownTo(this.open.length - 2);
     } else if (d.type === 'html') {
       const done = htmlBlockEnded(d, line);
-      d.text += curRest(cur) + (this.isFinalLine ? '' : '\n');
+      d.text += (matched >= 1 ? curRestX(cur) : curRest(cur)) + (this.isFinalLine ? '' : '\n');
       if (done) {
         this.closeDownTo(this.open.length - 2);
         this.pendingHtml = d;
@@ -1167,7 +1228,7 @@ class BlockParser {
       let inItem = false;
       for (let p = para.parent; p; p = p.parent) {
         if (p.type === 'list' && sameListType(p, lm)) return true;
-        if (p.type === 'item') inItem = true;
+        if (p.type === 'item' || p.type === 'quote') inItem = true;
         if (p.type === 'doc') break;
       }
       if (inItem && lm.contentNonEmpty) return true;
@@ -1191,7 +1252,11 @@ class BlockParser {
       if (curBlank(cur)) return; // nothing left on this line
       const inPara = deep.type === 'para';
       const indent = curIndent(cur);
-      const rest = curRest(cur);
+      // a line carried through any container frame (existing or started
+      // on this line) gets its leading tabs expanded, as marked's
+      // container dedent does; a top-level line keeps them raw
+      const framed = cur.off > 0 || cur.col > 0 || cur.partial > 0;
+      const rest = framed ? curRestX(cur) : curRest(cur);
       const firstNon = rest.slice(indent);
 
       // a list on top of the stack only continues with a list item;
@@ -1315,8 +1380,9 @@ class BlockParser {
       if (indent <= 3) {
         const lm = listMarkerAt(cur);
         if (lm) {
+          const nestedPara = inPara && deep.parent && deep.parent.type !== 'doc';
           const canInterrupt = !inPara || (lm.contentNonEmpty &&
-            (!lm.ordered || lm.num === 1));
+            (!lm.ordered || lm.num === 1 || nestedPara));
           if (canInterrupt) {
             if (inPara) this.closeDownTo(this.open.length - 2);
             this.startListItem(cur, lm);
@@ -1330,7 +1396,7 @@ class BlockParser {
         curAdvance(cur, 4);
         const code = newBlock('code', this.deepestContainer());
         code.fenced = false;
-        code.text = curRest(cur) + '\n';
+        code.text = (framed ? curRestX(cur) : curRest(cur)) + '\n';
         this.open.push(code);
         return;
       }
@@ -1625,9 +1691,11 @@ function splitCells(line) {
     if (c === '`') {
       let run = 0;
       while (line[i + run] === '`') run++;
-      // find closing run
+      // find closing run (a bare pipe ends the cell first: no span)
       let j = i + run, found = -1;
       while (j < n) {
+        if (line[j] === '\\') { j += 2; continue; }
+        if (line[j] === '|') break;
         if (line[j] === '`') {
           let r2 = 0;
           while (line[j + r2] === '`') r2++;
@@ -1667,27 +1735,27 @@ function tryTable(headerLine, delimLine) {
 
 // ---------------------------------------------------------------- render
 
-function renderBlocks(blocks, refs, inTightItem) {
+function renderBlocks(blocks, refs, inTightItem, state) {
   let out = '';
-  for (const b of blocks) out += renderBlock(b, refs, inTightItem);
+  for (const b of blocks) out += renderBlock(b, refs, inTightItem, state);
   return out;
 }
 
-function inlineOf(text, refs) {
-  return new InlineParser(refs).parse(text);
+function inlineOf(text, refs, state) {
+  return new InlineParser(refs, state).parse(text);
 }
 
-function renderBlock(b, refs, inTightItem) {
+function renderBlock(b, refs, inTightItem, state) {
   switch (b.type) {
     case 'doc':
-      return renderBlocks(b.children, refs, false);
+      return renderBlocks(b.children, refs, false, state);
     case 'para': {
-      const html = inlineOf(b.lines.join('\n'), refs);
+      const html = inlineOf(b.lines.join('\n'), refs, state);
       if (inTightItem) return html + '\n';
       return '<p>' + html + '</p>\n';
     }
     case 'heading':
-      return '<h' + b.level + '>' + inlineOf(b.text, refs) + '</h' + b.level + '>\n';
+      return '<h' + b.level + '>' + inlineOf(b.text, refs, state) + '</h' + b.level + '>\n';
     case 'hr':
       return '<hr>\n';
     case 'code': {
@@ -1703,19 +1771,19 @@ function renderBlock(b, refs, inTightItem) {
     case 'html':
       return b.text;
     case 'quote':
-      return '<blockquote>\n' + renderBlocks(b.children, refs, false) + '</blockquote>\n';
+      return '<blockquote>\n' + renderBlocks(b.children, refs, false, state) + '</blockquote>\n';
     case 'list': {
       const tag = b.ordered ? 'ol' : 'ul';
       const start = b.ordered && b.start !== 1 ? ' start="' + b.start + '"' : '';
       let out = '<' + tag + start + '>\n';
-      for (const item of b.children) out += renderItem(item, b, refs);
+      for (const item of b.children) out += renderItem(item, b, refs, state);
       return out + '</' + tag + '>\n';
     }
     case 'table': {
       let out = '<table>\n<thead>\n<tr>\n';
       for (let i = 0; i < b.header.length; i++) {
         out += '<th' + (b.aligns[i] ? ' align="' + b.aligns[i] + '"' : '') + '>' +
-          inlineOf(b.header[i], refs) + '</th>\n';
+          inlineOf(b.header[i], refs, state) + '</th>\n';
       }
       out += '</tr>\n</thead>\n';
       if (b.rows.length) {
@@ -1724,7 +1792,7 @@ function renderBlock(b, refs, inTightItem) {
           out += '<tr>\n';
           for (let i = 0; i < b.aligns.length; i++) {
             out += '<td' + (b.aligns[i] ? ' align="' + b.aligns[i] + '"' : '') + '>' +
-              inlineOf(row[i] || '', refs) + '</td>\n';
+              inlineOf(row[i] || '', refs, state) + '</td>\n';
           }
           out += '</tr>\n';
         }
@@ -1736,7 +1804,7 @@ function renderBlock(b, refs, inTightItem) {
   return '';
 }
 
-function renderItem(item, list, refs) {
+function renderItem(item, list, refs, state) {
   const tight = !list.loose;
   let inner = '';
   const kids = item.children;
@@ -1754,10 +1822,10 @@ function renderItem(item, list, refs) {
           text = text.slice(m[0].length);
         }
       }
-      const html = prefix + inlineOf(text, refs);
+      const html = prefix + inlineOf(text, refs, state);
       inner += tight ? html : '<p>' + html + '</p>\n';
     } else {
-      inner += renderBlock(ch, refs, false);
+      inner += renderBlock(ch, refs, false, state);
     }
   }
   return '<li>' + inner + '</li>\n';
@@ -1772,5 +1840,5 @@ export function parse(markdown) {
   src = src.replace(/\0/g, '�');
   const bp = new BlockParser();
   const doc = bp.parse(src);
-  return renderBlock(doc, bp.refs, false);
+  return renderBlock(doc, bp.refs, false, { inLink: false });
 }
