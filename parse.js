@@ -789,7 +789,7 @@ function tryHtmlBlock(lines, i, type7ok) {
   } else {
     while (j < lines.length && !isBlank(lines[j])) j++;
   }
-  return { text: lines.slice(i, j).join('\n'), consumed: j - i };
+  return { text: lines.slice(i, j).join('\n'), consumed: j - i, type };
 }
 
 function startsInterruptBlock(lines, j, defs, top = true) {
@@ -1001,7 +1001,9 @@ function lexBlocks(lines, defs, endsNl = false, top = true) {
     const hb = tryHtmlBlock(lines, i, true);
     if (hb) {
       const nx = i + hb.consumed;
-      const addNl = nx < lines.length ? !isBlank(lines[nx]) : endsNl;
+      const addNl = nx < lines.length
+        ? (hb.type <= 5 ? lines[nx].length > 0 : !isBlank(lines[nx]))
+        : endsNl;
       push({ t: 'html', text: hb.text + (addNl ? '\n' : '') });
       i += hb.consumed; continue;
     }
