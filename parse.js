@@ -671,11 +671,27 @@ function parseBlocks(src, refs) {
           continue;
         }
         let content = rest;
-        if (leaf.indentCols > 0) {
+        if (leaf.fenceChar === '~') {
+          // tilde fences keep their content indent in marked
+        } else if (leaf.indentCols > 0) {
           // strip up to the fence's indent, measured in columns: a tab
           // that straddles the boundary is consumed whole
           content = stripCols(rest, leaf.indentCols, absCol);
         }
+        if (content[0] === '\t' && leaf.depth > 1) {
+          // a fence nested in containers whose content line starts with
+          // a tab renders the tab as spaces up to the next tab stop,
+          // measured from the tab's column in the raw line (the
+          // container extraction expands it)
+          const rawLine = lines[li];
+          const tabIdx = rawLine.length - content.length;
+          if (tabIdx > 0 && rawLine[tabIdx] === '\t') {
+            let col = 0;
+            for (let k = 0; k < tabIdx; k++) col += rawLine[k] === '\t' ? 4 - (col % 4) : 1;
+            content = ' '.repeat(4 - (col % 4)) + content.slice(1);
+          }
+        }
+
         if (matchedAll) leaf._armed = true;
         leaf.lines.push(content);
         continue;
@@ -976,6 +992,7 @@ function parseBlocks(src, refs) {
             const code = newNode('code', {
               fenced: true, fenceChar: fm[1][0], fenceLen: fm[1].length,
               indentCols: ind.cols, info, lines: [],
+              depth: stack.length,
             });
             addLeaf(code);
             return;
