@@ -206,6 +206,30 @@ function failedLabel(src, bracket, st) {
   return { label: src.slice(bracket + 1, close), end: close + 1 };
 }
 
+function labelRuns(label) {
+  const runs = [];
+  for (let i = 0; i < label.length; i++) {
+    if (label[i] === '\\') { i++; continue; }
+    if (label[i] === '`') { let r = 0; while (label[i + r] === '`') r++; runs.push(r); i += r - 1; }
+  }
+  return runs;
+}
+function labelPoison(label) {
+  let open = 0;
+  for (const r of labelRuns(label)) {
+    if (open === 0) open = r;
+    else if (r === open) open = 0;
+  }
+  return open !== 0;
+}
+function labelHasCode(label) {
+  let open = 0, has = false;
+  for (const r of labelRuns(label)) {
+    if (open === 0) open = r;
+    else if (r === open) { open = 0; has = true; }
+  }
+  return has;
+}
 function tryLinkParse(src, bracket, st, isImage) {
   const close = scanBracket(src, bracket);
   if (close < 0) return null;
@@ -241,10 +265,10 @@ function tryLink(src, bracket, st, isImage) {
   if (!r) return null;
   if (isImage) {
     const alt = plainText(r.label, st);
-    return { html: `<img src="${encodeHref(r.href)}" alt="${escAttrNE(alt)}"${r.title !== null ? ` title="${escAttrNE(r.title)}"` : ''}>`, end: r.end };
+    return { html: `<img src="${encodeHref(r.href)}" alt="${escAttrNE(alt)}"${r.title !== null ? ` title="${escAttrNE(r.title)}"` : ''}>`, end: r.end, poison: labelPoison(r.label), hasCode: labelHasCode(r.label) };
   }
   const inner = parseInline(r.label, { defs: st.defs, inLink: true, doc: st.doc });
-  return { html: `<a href="${encodeHref(r.href)}"${r.title !== null ? ` title="${escAttrNE(r.title)}"` : ''}>${inner}</a>`, end: r.end };
+  return { html: `<a href="${encodeHref(r.href)}"${r.title !== null ? ` title="${escAttrNE(r.title)}"` : ''}>${inner}</a>`, end: r.end, poison: labelPoison(r.label), hasCode: labelHasCode(r.label) };
 }
 
 function trimAutolink(s) {
@@ -294,7 +318,7 @@ function parseInline(src, st) {
   const et = st.plain ? (x) => x : escText;
   let txt = '';
   const flush = () => { if (txt) { atoms.push({ k: 'h', s: txt }); txt = ''; } };
-  const pushHtml = (s) => { flush(); atoms.push({ k: 'h', s }); };
+  const pushHtml = (s, fl) => { flush(); atoms.push(fl ? { k: 'h', s, ...fl } : { k: 'h', s }); };
   let i = 0;
   const n = src.length;
   let skipLeadWs = false;
@@ -316,7 +340,7 @@ function parseInline(src, st) {
       if (close >= 0) {
         let content = src.slice(i + run, close).replace(/\n/g, ' ');
         if (content.length >= 2 && content[0] === ' ' && content[content.length - 1] === ' ' && /[^ ]/.test(content)) content = content.slice(1, -1);
-        pushHtml(st.plain ? content : '<code>' + escCode(content) + '</code>');
+        pushHtml(st.plain ? content : '<code>' + escCode(content) + '</code>', st.plain ? null : { cs: true });
         i = close + run; continue;
       }
       txt += '`'.repeat(run); i += run; continue;
@@ -355,7 +379,7 @@ function parseInline(src, st) {
         if (r) { pushHtml(plainText(r.label, st)); i = r.end; continue; }
       } else {
         const r = tryLink(src, i + 1, st, true);
-        if (r) { pushHtml(r.html); i = r.end; continue; }
+        if (r) { pushHtml(r.html, { poison: r.poison, cs: r.hasCode }); i = r.end; continue; }
         const f = failedLabel(src, i + 1, st);
         if (f) { pushHtml('![' + parseInline(f.label, { defs: st.defs, inLink: true, doc: st.doc, noEm: true }) + ']'); i = f.end; continue; }
       }
@@ -368,7 +392,7 @@ function parseInline(src, st) {
           if (r) { pushHtml(plainText(r.label, st)); i = r.end; continue; }
         } else {
           const r = tryLink(src, i, st, false);
-          if (r) { pushHtml(r.html); i = r.end; continue; }
+          if (r) { pushHtml(r.html, { poison: r.poison, cs: r.hasCode }); i = r.end; continue; }
           const f = failedLabel(src, i, st);
           if (f) { pushHtml('[' + parseInline(f.label, { defs: st.defs, inLink: true, doc: st.doc, noEm: true }) + ']'); i = f.end; continue; }
         }
@@ -510,6 +534,10 @@ function emGlued(atoms, ci) {
 
 function processDelims(atoms) {
   // CommonMark-style delimiter processing.
+  const poisonBefore = new Array(atoms.length).fill(false);
+  const codeAfter = new Array(atoms.length).fill(false);
+  { let seen = false; for (let i = 0; i < atoms.length; i++) { poisonBefore[i] = seen; if (atoms[i].poison) seen = true; } }
+  { let seen = false; for (let i = atoms.length - 1; i >= 0; i--) { codeAfter[i] = seen; if (atoms[i].cs) seen = true; } }
   let ci = 0;
   while (ci < atoms.length) {
     const closer = atoms[ci];
@@ -523,6 +551,7 @@ function processDelims(atoms) {
       const u = (a.len >= 2 && closer.len >= 2) ? 2 : 1;
       if (u === 1 && closer.ch === '*' && emPoisoned(atoms, j, ci)) continue;
       if (u === 1 && closer.ch === '*' && a.len >= 2 && emGlued(atoms, ci)) continue;
+      if (poisonBefore[j] && codeAfter[ci]) continue;
       opener = a; oi = j; break;
     }
     if (!opener) { ci++; continue; }
