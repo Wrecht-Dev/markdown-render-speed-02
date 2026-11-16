@@ -87,21 +87,25 @@ function decodeEntities(s) {
 }
 
 const ESC_AMP = '\uE000'; // sentinel: a literal & that came from a backslash escape
+const HTML_ESC_RE = /&(?!(?:[A-Za-z][A-Za-z0-9]*;|#[0-9]{1,7};|#[xX][0-9a-fA-F]{1,6};))|[<>"']/g;
+const HTML_ESC_TEST = /[&<>"'\uE000]/;
+const CODE_ESC_RE = /[&<>"']/g;
+const CODE_ESC_TEST = /[&<>"']/;
+function escChar(ch) {
+  return ch === '&' ? '&amp;' : ch === '<' ? '&lt;' : ch === '>' ? '&gt;' : ch === '"' ? '&quot;' : '&#39;';
+}
 function escapeHtml(s, encode) {
   // For ordinary text: entity-shaped &...; sequences pass through untouched,
   // other & become &amp;. Quotes and apostrophes are escaped too.
-  let out = s.replace(/&(?!(?:[A-Za-z][A-Za-z0-9]*;|#[0-9]{1,7};|#[xX][0-9a-fA-F]{1,6};))/g, '&amp;');
-  out = out.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  out = out.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  if (!HTML_ESC_TEST.test(s)) return s;
+  let out = s.replace(HTML_ESC_RE, escChar);
   if (out.indexOf(ESC_AMP) !== -1) out = out.split(ESC_AMP).join('&amp;');
   return out;
 }
 function escapeCode(s) {
   // In code, every & is escaped; there is no entity passthrough.
-  let out = s.replace(/&/g, '&amp;');
-  out = out.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  out = out.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  return out;
+  if (!CODE_ESC_TEST.test(s)) return s;
+  return s.replace(CODE_ESC_RE, escChar);
 }
 function escapeHref(href) {
   let out;
@@ -121,7 +125,9 @@ function isPunct(ch) {
 }
 function isUnicodeWs(ch) {
   if (!ch) return false;
-  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v' || /\s/.test(ch);
+  if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v') return true;
+  if (ch.charCodeAt(0) < 128) return false;
+  return /\s/.test(ch);
 }
 
 // ---------- line utilities (tab expansion to columns) ----------
@@ -1078,7 +1084,11 @@ function parseBlocks(src, refs) {
 const AUTOLINK_SCHEME_RE = /^<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*)>/;
 const AUTOLINK_EMAIL_RE = /^<([A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+)>/;
 const HTML_COMMENT_RE = /^<!--(?:>|->|[\s\S]*?-->)/;
-const EMAIL_AUTOLINK_RE = /^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/;
+const EMAIL_AUTOLINK_RE = /[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+/y;
+const WWW_AUTOLINK_RE = /www\.[^\s<]+/y;
+const HTTP_AUTOLINK_RE = /https?:\/\/[^\s<]+/iy;
+const SCHEME_PREFIX_RE = /(?:mailto|xmpp):/y;
+const XMPP_SEG_RE = /\/[^\s/<]+/y;
 
 // marked's link label matching never forms a link when the label
 // contains a code span whose content itself contains a backtick and
@@ -1419,10 +1429,11 @@ function parseInline(text, refs) {
 
     // extended autolinks: www. / http(s):// / bare emails in plain text
     if ((i === 0 || isUnicodeWs(text[i - 1]) || isPunct(text[i - 1])) && /[A-Za-z0-9]/.test(c)) {
-      const rest = text.slice(i);
       if (c === 'w' || c === 'h' || c === 'H') {
         // the scheme is case-insensitive; the www. form is not
-        const m = (c === 'w' ? /^www\.[^\s<]+/ : /^https?:\/\/[^\s<]+/i).exec(rest);
+        const re = c === 'w' ? WWW_AUTOLINK_RE : HTTP_AUTOLINK_RE;
+        re.lastIndex = i;
+        const m = re.exec(text);
         if (m) {
           let url = m[0];
           // inside an active pending bracket, an autolink may not
@@ -1432,7 +1443,7 @@ function parseInline(text, refs) {
             if (cut !== -1) url = url.slice(0, cut);
           }
           url = trimAutolink(url);
-          if (url.length > (rest.startsWith('www.') ? 4 : 8)) {
+          if (url.length > (c === 'w' ? 4 : 8)) {
             flushBuf();
             const href = url.startsWith('www.') ? 'http://' + url : url;
             nodes.push({ kind: 'link', href: href, title: null, auto: true, children: [{ kind: 'text', text: url }] });
@@ -1441,13 +1452,16 @@ function parseInline(text, refs) {
         }
       }
       // mailto:/xmpp: prefixed addresses link as a whole
-      const sm = /^(?:mailto|xmpp):/.exec(rest);
+      SCHEME_PREFIX_RE.lastIndex = i;
+      const sm = SCHEME_PREFIX_RE.exec(text);
       if (sm) {
-        const em2 = EMAIL_AUTOLINK_RE.exec(rest.slice(sm[0].length));
+        EMAIL_AUTOLINK_RE.lastIndex = i + sm[0].length;
+        const em2 = EMAIL_AUTOLINK_RE.exec(text);
         if (em2) {
           let full = sm[0] + em2[0];
           if (sm[0] === 'xmpp:') {
-            const seg = /^\/[^\s/<]+/.exec(rest.slice(full.length));
+            XMPP_SEG_RE.lastIndex = i + full.length;
+            const seg = XMPP_SEG_RE.exec(text);
             if (seg && seg[0].indexOf('/', 1) === -1) full += seg[0];
           }
           const after = text[i + full.length];
@@ -1458,7 +1472,8 @@ function parseInline(text, refs) {
           }
         }
       }
-      const em = EMAIL_AUTOLINK_RE.exec(rest);
+      EMAIL_AUTOLINK_RE.lastIndex = i;
+      const em = EMAIL_AUTOLINK_RE.exec(text);
       if (em && text[i + em[0].length] !== '@') {
         const afterPos = i + em[0].length;
         const after = text[afterPos];
