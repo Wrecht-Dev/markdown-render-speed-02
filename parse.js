@@ -221,7 +221,7 @@ function trimAutolink(s) {
     while (s.endsWith(')') && close > open) { s = s.slice(0, -1); close--; }
     if (s.endsWith(';')) {
       const m = /&[a-zA-Z0-9]+;$/.exec(s);
-      if (m) s = s.slice(0, -1);
+      if (m) s = s.slice(0, s.length - m[0].length);
     }
   } while (s !== prev);
   return s;
@@ -365,14 +365,24 @@ function parseInline(src, st) {
         }
         if (!text && (rest.startsWith('mailto:') || rest.startsWith('xmpp:'))) {
           const mm = /^(?:mailto:|xmpp:)([a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9_-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9_-]{0,61}[a-zA-Z0-9])?)+)/.exec(rest);
-          if (mm) { text = rest.slice(0, mm[0].length); href = text; }
+          if (mm) {
+            let cand = rest.slice(0, mm[0].length);
+            const after = rest[mm[0].length];
+            if (after === '-' || after === '_') { /* invalid: address continues badly */ }
+            else {
+              if (rest.startsWith('xmpp:') && after === '/') {
+                const seg = /^\/[^\s/]+/.exec(rest.slice(mm[0].length));
+                if (seg) cand += seg[0];
+              }
+              text = cand; href = cand;
+            }
+          }
         }
         if (!text) {
           const mm = BARE_EMAIL_RE.exec(rest);
           if (mm) {
-            let cand = mm[0];
-            // email must not be immediately followed by more domain chars
-            text = cand; href = 'mailto:' + cand;
+            const after = rest[mm[0].length];
+            if (after !== '-' && after !== '_') { text = mm[0]; href = 'mailto:' + mm[0]; }
           }
         }
         if (text) { pushHtml(st.plain ? text : `<a href="${encodeHref(href)}">${escText(text)}</a>`); i += text.length; continue; }
@@ -690,6 +700,16 @@ function tryDef(lines, i, defs) {
 }
 
 // HTML block starting at lines[i]. Returns {text, consumed} or null. type7ok: allow type 7.
+const ATTR_SRC = "[a-zA-Z_:][a-zA-Z0-9_.:-]*(?:\\s*=\\s*(?:[^\"'=<>`\\s]+|'[^']*'|\"[^\"]*\"))?";
+const TYPE7_OPEN_RE = new RegExp('^<([a-zA-Z][a-zA-Z0-9-]*)(?:\\s+' + ATTR_SRC + ')*\\s*/?>[ \\t]*$');
+const TYPE7_CLOSE_RE = /^<\/([a-zA-Z][a-zA-Z0-9-]*)\s*>[ \t]*$/;
+function isType7Line(s) {
+  let m = TYPE7_OPEN_RE.exec(s);
+  if (m) return !BLOCK_TAGS.has(m[1].toLowerCase());
+  m = TYPE7_CLOSE_RE.exec(s);
+  if (m) return !BLOCK_TAGS.has(m[1].toLowerCase());
+  return false;
+}
 function tryHtmlBlock(lines, i, type7ok) {
   const l = lines[i];
   if (leadCols(l) > 3) return null;
@@ -702,7 +722,7 @@ function tryHtmlBlock(lines, i, type7ok) {
   else if (/^<![A-Z]/.test(s)) { type = 4; closePat = />/; }
   else if (s.startsWith('<![CDATA[')) { type = 5; closePat = /\]\]>/; }
   else if ((m = /^<\/?([a-zA-Z][a-zA-Z0-9-]*)(?=[\s/>]|$)/.exec(s)) && BLOCK_TAGS.has(m[1].toLowerCase())) type = 6;
-  else if (type7ok && (m = /^<(?:([a-zA-Z][a-zA-Z0-9-]*)(?:\s+[a-zA-Z_:][a-zA-Z0-9_.:-]*(?:\s*=\s*(?:[^"'=<>`\s]+|'[^']*'|"[^"]*"))?)*\s*\/?>|\/([a-zA-Z][a-zA-Z0-9-]*)\s*)>[ \t]*$/.exec(s)) && !BLOCK_TAGS.has((m[1] || m[2]).toLowerCase())) type = 7;
+  else if (type7ok && isType7Line(s)) type = 7;
   if (!type) return null;
   let j = i;
   if (type <= 5) {
@@ -787,11 +807,11 @@ function parseList(lines, i, defs) {
     if (inFence) {
       cur.lines.push(ind >= cur.contentIndent ? dedentLine(l, cur.contentIndent, 0) : l);
       if (isFenceClose(l, inFence.ch, inFence.len)) inFence = null;
-      if (pendingBlanks) { loose = true; pendingBlanks = 0; }
+      pendingBlanks = 0;
       j++; continue;
     }
     if (ind >= cur.contentIndent) {
-      if (pendingBlanks) { loose = true; pendingBlanks = 0; }
+      pendingBlanks = 0;
       const content = dedentLine(l, cur.contentIndent, 0);
       cur.lines.push(content);
       const f = matchFenceStart(content);
@@ -893,7 +913,7 @@ function lexBlocks(lines, defs, endsNl = false) {
           if (/^ {0,3}(=+|-+)[ \t]*$/.test(cl)) {
             let chunkStart = 0;
             for (let k = inner.length - 1; k >= 0; k--) { if (isBlank(inner[k])) { chunkStart = k + 1; break; } }
-            const chunkLen = inner.length - chunkStart;
+            const chunkLen = inner.slice(chunkStart).reduce((a, x) => a + x.split('\n').length, 0);
             inner[inner.length - 1] += '\n' + (chunkLen >= 2 ? '    ' + cl.trim() : cl);
           } else {
             inner[inner.length - 1] += '\n' + (leadCols(cl) >= 4 ? consumeCols(cl, 4) : cl);
