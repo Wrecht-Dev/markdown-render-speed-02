@@ -34,7 +34,8 @@ function escAttr(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function escCode(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // Decode one numeric character reference body (the part between &# and ;).
@@ -119,7 +120,8 @@ function cleanUrl(href) {
 }
 
 function normalizeLabel(s) {
-  return s.replace(/[\t\n\v\f\r ]+/g, ' ').replace(/^ | $/g, '').toLowerCase();
+  return s.replace(/\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g, '$1')
+    .replace(/[\t\n\v\f\r ]+/g, ' ').replace(/^ | $/g, '').toLowerCase();
 }
 
 // ---------------------------------------------------------------- inline
@@ -944,15 +946,38 @@ class BlockParser {
         return;
       }
       if (!this.wouldInterrupt(cur, deep)) {
-        deep.lines.push(curRest(cur));
+        deep.lines.push(curRest(cur).replace(/^[ \t]+/, ''));
         this.prevBlank = false;
         return;
       }
     }
-    if (containerFailed) this.closeDownTo(matched);
+    if (containerFailed) {
+      // html blocks cut off by a failed container lose their last newline
+      for (let x = matched + 1; x < this.open.length; x++) {
+        const b = this.open[x];
+        if (b.type === 'html') b.text = b.text.replace(/\n$/, '');
+      }
+      this.closeDownTo(matched);
+    }
+
+    // a whitespace-only line inside a blockquote whose remaining text is
+    // non-empty continues the quote's paragraph with that whitespace
+    if (blank && !containerFailed && deep.type === 'para' &&
+        curRest(cur).length > 0 &&
+        open.slice(1, matched + 1).some(b => b.type === 'quote')) {
+      deep.lines.push(curRest(cur));
+      this.prevBlank = false;
+      return;
+    }
 
     // ---- blank line handling
     if (blank) {
+      // an html block closed by its end tag on the previous line drops
+      // its trailing newline when a blank line follows
+      if (this.pendingHtml) {
+        this.pendingHtml.text = this.pendingHtml.text.replace(/\n$/, '');
+        this.pendingHtml = null;
+      }
       const d = this.deepest();
       if (d.type === 'code' && !d.fenced) {
         // indented code absorbs the blank line (may be interior); a line
@@ -994,12 +1019,20 @@ class BlockParser {
         this.prevBlank = true;
         return;
       }
-      if (this.prevBlank) {
-        // two blank lines in a row close all containers
-        this.closeDownTo(0);
-      } else {
-        if (d.type === 'para') {
-          d.lastLineBlank = true;
+      // an item that began with an empty line ends at the first blank
+      // line before it gains any content
+      for (let x = this.open.length - 1; x >= 1; x--) {
+        const b = this.open[x];
+        if (b.type === 'item' && b.emptyStart && b.children.length === 0) {
+          this.closeDownTo(x - 1);
+          break;
+        }
+        if (b.type !== 'list' && b.type !== 'item') break;
+      }
+      {
+        const d2 = this.deepest();
+        if (d2.type === 'para') {
+          d2.lastLineBlank = true;
           this.closeDownTo(this.open.length - 2);
         }
         this.markBlank();
@@ -1008,6 +1041,7 @@ class BlockParser {
       return;
     }
 
+    this.pendingHtml = null;
     // ---- leaf continuations
     const d = this.deepest();
     if (d.type === 'code') {
@@ -1039,7 +1073,10 @@ class BlockParser {
     } else if (d.type === 'html') {
       const done = htmlBlockEnded(d, line);
       d.text += curRest(cur) + (this.isFinalLine ? '' : '\n');
-      if (done) this.closeDownTo(this.open.length - 2);
+      if (done) {
+        this.closeDownTo(this.open.length - 2);
+        this.pendingHtml = d;
+      }
       this.prevBlank = false;
       return;
     } else if (d.type === 'table') {
@@ -1079,7 +1116,14 @@ class BlockParser {
     if (/^([*\-_])(?:[ \t]*\1){2,}[ \t]*$/.test(firstNon)) return true;
     if (para.lines.length === 1 && tryTable(para.lines[0], firstNon)) return true;
     const lm = listMarkerAt(cur);
-    if (lm && lm.contentNonEmpty && (!lm.ordered || lm.num === 1)) return true;
+    if (lm) {
+      // a marker that continues an enclosing list always interrupts
+      for (let p = para.parent; p; p = p.parent) {
+        if (p.type === 'list' && sameListType(p, lm)) return true;
+        if (p.type === 'doc') break;
+      }
+      if (lm.contentNonEmpty && (!lm.ordered || lm.num === 1)) return true;
+    }
     return false;
   }
 
@@ -1097,6 +1141,7 @@ class BlockParser {
   startBlocks(cur, line) {
     for (;;) {
       const deep = this.deepest();
+      if (curBlank(cur)) return; // nothing left on this line
       const inPara = deep.type === 'para';
       const indent = curIndent(cur);
       const rest = curRest(cur);
@@ -1165,7 +1210,10 @@ class BlockParser {
           h.endTag = hb.endTag;
           h.text = rest + (this.isFinalLine ? '' : '\n');
           this.open.push(h);
-          if (htmlBlockEnded(h, h.text)) this.closeDownTo(this.open.length - 2);
+          if (htmlBlockEnded(h, h.text)) {
+            this.closeDownTo(this.open.length - 2);
+            this.pendingHtml = h;
+          }
           return;
         }
       }
@@ -1173,6 +1221,20 @@ class BlockParser {
       if (inPara && indent <= 3) {
         const m = /^(=+|-+)[ \t]*$/.exec(firstNon);
         if (m) {
+          // link reference definitions at the paragraph's start are
+          // consumed first; only the remainder can become the heading
+          const restText = extractDefsFromText(deep.lines.join('\n'), this.refs);
+          if (restText === null) {
+            // nothing but definitions: the underline line starts fresh
+            const parent = deep.parent;
+            parent.children.splice(parent.children.indexOf(deep), 1);
+            this.open.pop();
+            const p = newBlock('para', parent);
+            p.lines = [firstNon.replace(/[ \t]+$/, '')];
+            this.open.push(p);
+            return;
+          }
+          deep.lines = [restText];
           const h = { type: 'heading', children: [], parent: deep.parent,
             id: BLOCK_ID++, lastLineBlank: false,
             text: deep.lines.join('\n').replace(/^[ \t\n]+/, '').replace(/[ \t]+$/, ''),
@@ -1286,6 +1348,7 @@ class BlockParser {
     }
     const item = newBlock('item', list);
     item.padding = ind + contentIndent;
+    item.emptyStart = curBlank(cur);
     this.open.push(item);
   }
 
@@ -1439,6 +1502,16 @@ function parseOneDef(text, pos) {
     if (j === st || depth !== 0) return null;
   }
   href = decodeRefsRaw(href);
+  // fallback end: if a would-be title sits on a later line but is junk,
+  // the definition still counts (without title) and ends at the
+  // destination's line.
+  let fallbackEnd = -1;
+  {
+    let e = j;
+    while (text[e] === ' ' || text[e] === '\t') e++;
+    if (text[e] === '\n') fallbackEnd = e + 1;
+    else if (e >= n) fallbackEnd = n;
+  }
   // optional title: must be preceded by whitespace (spaces/tabs and at
   // most one newline in total across the gap)
   let k = j, newlines = 0, sawWs = false;
@@ -1457,12 +1530,22 @@ function parseOneDef(text, pos) {
       if (c === close) { okk = true; break; }
       t += c; q++;
     }
-    if (!okk) return null;
+    if (!okk) {
+      if (newlines === 1 && fallbackEnd !== -1) {
+        return { label: normalizeLabel(label), href, title: null, end: fallbackEnd };
+      }
+      return null;
+    }
     title = decodeRefsRaw(t);
     k = q + 1;
     // after a title, only spaces/tabs until newline or end
     while (text[k] === ' ' || text[k] === '\t') k++;
-    if (k < n && text[k] !== '\n') return null;
+    if (k < n && text[k] !== '\n') {
+      if (newlines === 1 && fallbackEnd !== -1) {
+        return { label: normalizeLabel(label), href, title: null, end: fallbackEnd };
+      }
+      return null;
+    }
   } else {
     // no title: only spaces/tabs until newline or end
     k = j;
