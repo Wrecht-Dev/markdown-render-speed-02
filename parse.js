@@ -943,6 +943,7 @@ function lexBlocks(lines, defs, endsNl = false) {
     if (def) {
       const key = normLabel(def.label);
       if (!defs.has(key)) defs.set(key, { href: def.href, title: def.title });
+      push({ t: 'def' });
       i += def.consumed; continue;
     }
     // paragraph (with setext + table detection)
@@ -1013,6 +1014,7 @@ function renderToken(tok, defs, tight) {
     case 'code':
       return `<pre><code${tok.lang ? ` class="language-${escAttrNE(tok.lang)}"` : ''}>${escCode(tok.text)}</code></pre>\n`;
     case 'hr': return '<hr>\n';
+    case 'def': return '';
     case 'html': return tok.text;
     case 'quote':
       return `<blockquote>\n${renderTokens(tok.tokens, defs)}</blockquote>\n`;
