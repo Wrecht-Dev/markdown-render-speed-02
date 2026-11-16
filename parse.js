@@ -454,11 +454,12 @@ function processDelims(atoms) {
       const a = atoms[j];
       if (a.k !== 'd' || a.ch !== closer.ch || !a.canOpen || a.len === 0) continue;
       if ((closer.canOpen || a.canClose) && (a.olen + closer.olen) % 3 === 0 && (a.olen % 3 !== 0 || closer.olen % 3 !== 0)) continue;
+      const u = (a.len >= 2 && closer.len >= 2) ? 2 : 1;
+      if (u === 1 && closer.ch === '*' && emPoisoned(atoms, j, ci)) continue;
       opener = a; oi = j; break;
     }
     if (!opener) { ci++; continue; }
     const use = (opener.len >= 2 && closer.len >= 2) ? 2 : 1;
-    if (use === 1 && closer.ch === '*' && emPoisoned(atoms, oi, ci)) { ci++; continue; }
     opener.len -= use; closer.len -= use;
     const tag = closer.ch === '~' ? 'del' : (use === 2 ? 'strong' : 'em');
     const plainMode = atoms.plainMode;
@@ -609,21 +610,25 @@ function isFenceClose(l, ch, len) {
   return !!m && m[1][0] === ch && m[1].length >= len;
 }
 
-// Strip one blockquote marker; returns content line (tabs expanded) or null.
+// Strip one blockquote marker; returns content line or null. Leading
+// whitespace of the content is expanded to spaces in the original line's
+// column frame; a tab serving as the marker's whitespace loses one column.
 function stripQuote(l) {
   let i = 0, col = 0;
-  while (i < l.length && col < 4 && (l[i] === ' ' || l[i] === '\t')) {
-    if (l[i] === ' ') { if (col >= 3) break; col++; i++; }
+  while (i < l.length && col < 3 && (l[i] === ' ' || l[i] === '\t')) {
+    if (l[i] === ' ') { col++; i++; }
     else { col += 4 - (col % 4); i++; }
-    if (col > 3 && l[i - 1] === ' ') break;
   }
-  if (col > 3) return null;
-  if (l[i] !== '>') return null;
+  if (col > 3 || l[i] !== '>') return null;
   i++; col++;
-  let rest = l.slice(i);
-  if (rest.startsWith(' ')) { rest = rest.slice(1); col++; }
-  else if (rest.startsWith('\t')) { rest = expandTabs(rest, col); rest = rest.slice(1); }
-  return expandTabs(rest, col);
+  let out = '';
+  if (l[i] === ' ') { i++; col++; }
+  else if (l[i] === '\t') { const w = 4 - (col % 4); out += ' '.repeat(w - 1); col += w; i++; }
+  while (i < l.length && (l[i] === ' ' || l[i] === '\t')) {
+    if (l[i] === ' ') { out += ' '; col++; i++; }
+    else { const w = 4 - (col % 4); out += ' '.repeat(w); col += w; i++; }
+  }
+  return out + l.slice(i);
 }
 
 // Parse a list marker at line start. Returns null or marker info.
@@ -846,8 +851,10 @@ function parseList(lines, i, defs) {
     const ind = leadCols(l);
     if (inFence) {
       if (ind < cur.contentIndent && fenceContent === 0) {
-        // fence has gathered no content line yet: it does not absorb this line
-        inFence = null;
+        // fence gathered no content line: it closes empty, the item ends,
+        // and this line is reprocessed outside the item
+        finishItem(false);
+        continue;
       } else {
         const content = ind >= cur.contentIndent ? dedentLine(l, cur.contentIndent, 0) : l;
         cur.lines.push(content);
