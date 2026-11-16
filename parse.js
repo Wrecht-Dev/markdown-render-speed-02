@@ -166,7 +166,7 @@ const EMAILLINK_RE = /^<([a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z
 // GFM extended autolink pieces (used while scanning plain text).
 const WWW_RE = /^www\.[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+(?:[^\s<]*)?/;
 const HTTP_RE = /^https?:\/\/[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*(?:[^\s<]*)?/i;
-const EMAIL_RE = /^[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+/;
+const EMAIL_RE = /^[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)+/;
 
 // Trim an extended autolink per GFM rules: drop trailing punctuation,
 // drop a trailing ')' when parens are unbalanced, stop before '<',
@@ -324,9 +324,22 @@ class InlineParser {
     }
     m = EMAIL_RE.exec(rest);
     if (m) {
-      const url = m[0];
+      let url = m[0];
       const after = rest[url.length];
-      // a domain that continues with - or _ is not a valid email autolink
+      // an email may not end with - or _ (they are domain characters,
+      // so a trailing one means the address continues invalidly) —
+      // except a trailing _ run that closes an open _ emphasis span:
+      // the span's content is lexed as its own unit, so the address
+      // ends before the delimiter run
+      if (url.endsWith('_')) {
+        const trail = /_+$/.exec(url)[0].length;
+        const cand = url.slice(0, url.length - trail);
+        if (cand && !cand.endsWith('-') && !cand.endsWith('_') &&
+            this.delims.some(d => d.ch === '_' && d.canOpen)) {
+          url = cand;
+        } else return null;
+      }
+      if (url.endsWith('-')) return null;
       if (after === '-' || after === '_') return null;
       const clean = cleanUrl('mailto:' + url);
       if (clean === null) return null;
@@ -339,6 +352,7 @@ class InlineParser {
       if (inner) {
         let url = m[0] + inner[0];
         let after = rest[url.length];
+        if (inner[0].endsWith('-') || inner[0].endsWith('_')) return null;
         if (after === '-' || after === '_') return null;
         // xmpp may carry one /resource segment (no second slash)
         if (m[0] === 'xmpp:' && after === '/') {
