@@ -1421,8 +1421,20 @@ function parseInline(text, refs) {
       }
       const em = EMAIL_AUTOLINK_RE.exec(rest);
       if (em && text[i + em[0].length] !== '@') {
-        const after = text[i + em[0].length];
-        if (after !== '-' && after !== '_') {
+        const afterPos = i + em[0].length;
+        const after = text[afterPos];
+        // a trailing - or _ kills the autolink, except when the _ run
+        // closes an emphasis span that opened before the address (the
+        // address is then at the end of the span's inner text)
+        let ok = after !== '-' && after !== '_';
+        if (!ok && after === '_') {
+          let runEnd = afterPos;
+          while (text[runEnd] === '_') runEnd++;
+          const fol = text[runEnd];
+          const canClose = fol === undefined || isUnicodeWs(fol) || isPunct(fol);
+          if (canClose && delims.some((d) => d.char === '_' && d.len > 0 && d.canOpen)) ok = true;
+        }
+        if (ok) {
           flushBuf();
           nodes.push({ kind: 'link', href: 'mailto:' + em[0], title: null, auto: true, children: [{ kind: 'text', text: em[0] }] });
           i += em[0].length; continue;
