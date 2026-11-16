@@ -424,7 +424,9 @@ function parseInline(src, st) {
           const mm = BARE_EMAIL_RE.exec(rest);
           if (mm) {
             const after = rest[mm[0].length];
-            if (after !== '-' && after !== '_') { text = mm[0]; href = 'mailto:' + mm[0]; }
+            // a trailing _ is fine when it closes a pending _ emphasis
+            const uscoreOk = after === '_' && atoms.some(a => a.k === 'd' && a.ch === '_' && a.len > 0 && a.canOpen);
+            if ((after !== '-' && after !== '_') || uscoreOk) { text = mm[0]; href = 'mailto:' + mm[0]; }
           }
         }
         if (text) { pushHtml(st.plain ? text : `<a href="${encodeHref(href)}">${escText(text)}</a>`); i += text.length; continue; }
