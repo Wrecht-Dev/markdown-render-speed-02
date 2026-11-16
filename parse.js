@@ -41,25 +41,24 @@ const BARE_EMAIL_RE = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-
 
 // Find the index just past the bracket matching src[start] === '['.
 function scanBracket(src, start) {
-  let depth = 0, i = start;
+  let depth = 0, i = start, inSpan = false;
   while (i < src.length) {
     const c = src[i];
     if (c === '\\') { i += 2; continue; }
     if (c === '`') {
       let n = 0; while (src[i + n] === '`') n++;
-      const close = findCodeClose(src, i + n, n);
-      if (close >= 0) { i = close + n; continue; }
+      inSpan = !inSpan;
       i += n; continue;
     }
-    if (c === '<') {
+    if (!inSpan && c === '<') {
       const am = SCHEME_AUTOLINK_RE.exec(src.slice(i, i + 300)) || EMAIL_AUTOLINK_RE.exec(src.slice(i));
       if (am) { i += am[0].length; continue; }
       const tm = TAG_RE.exec(src.slice(i));
       if (tm) { i += tm[0].length; continue; }
       i++; continue;
     }
-    if (c === '[') depth++;
-    else if (c === ']') { depth--; if (depth === 0) return i; }
+    if (!inSpan && c === '[') depth++;
+    else if (!inSpan && c === ']') { depth--; if (depth === 0) return i; }
     i++;
   }
   return -1;
@@ -415,6 +414,30 @@ function parseInline(src, st) {
   return out;
 }
 
+// marked rejects a single-* emphasis whose content contains a strong pair
+// whose closing run is immediately followed by a word character, unless that
+// word run is itself immediately followed by a ** run followed by a non-word.
+function emPoisoned(atoms, oi, ci) {
+  let pseudo = '';
+  for (let j = oi + 1; j < ci; j++) {
+    const a = atoms[j];
+    if (a.k === 'h') pseudo += a.s.replace(/<strong>/g, '\u0001').replace(/<\/strong>/g, '\u0002').replace(/<[^>]*>/g, '');
+    else if (a.k === 'd') pseudo += a.ch.repeat(a.len);
+  }
+  const re = /\u0001(?:[^\u0001\u0002]|\u0002[^\u0001])*?\u0002([\p{L}\p{N}]+)(\*\*)?/gu;
+  let m;
+  while ((m = re.exec(pseudo)) !== null) {
+    const before = m.index > 0 ? pseudo[m.index - 1] : '';
+    if (!/\s/.test(before)) continue;
+    if (m[2]) {
+      const after = pseudo[re.lastIndex];
+      if (after === undefined || !/[\p{L}\p{N}]/u.test(after)) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 function processDelims(atoms) {
   // CommonMark-style delimiter processing.
   let ci = 0;
@@ -431,6 +454,7 @@ function processDelims(atoms) {
     }
     if (!opener) { ci++; continue; }
     const use = (opener.len >= 2 && closer.len >= 2) ? 2 : 1;
+    if (use === 1 && closer.ch === '*' && emPoisoned(atoms, oi, ci)) { ci++; continue; }
     opener.len -= use; closer.len -= use;
     const tag = closer.ch === '~' ? 'del' : (use === 2 ? 'strong' : 'em');
     const plainMode = atoms.plainMode;
