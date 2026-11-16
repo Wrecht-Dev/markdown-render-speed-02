@@ -777,7 +777,7 @@ function parseList(lines, i, defs) {
     const l = lines[j];
     if (cur === null) {
       const mk = matchListMarker(l);
-      if (!mk || !sameKind(mk) || mk.ind > 3) break;
+      if (!mk || !sameKind(mk) || mk.ind - first.ind > 3) break;
       cur = { lines: [mk.blankAfter ? '' : dedentLine(lines[j].slice(mk.afterIdx), mk.contentIndent - mk.ind - mk.mlen, mk.ind + mk.mlen)], contentIndent: mk.contentIndent, startLine: j };
       pendingBlanks = 0; inFence = null;
       const f = matchFenceStart(cur.lines[0]);
@@ -793,7 +793,7 @@ function parseList(lines, i, defs) {
       const nl = lines[k];
       const nmk = matchListMarker(nl);
       const nind = leadCols(nl);
-      const nextIsItem = nmk && sameKind(nmk) && nmk.ind <= 3 && nind < cur.contentIndent;
+      const nextIsItem = nmk && sameKind(nmk) && nmk.ind - first.ind <= 3 && nind < cur.contentIndent;
       if (!hasContent && !inFence && !nextIsItem) break; // item that starts blank is empty; list ends
       if (nextIsItem || nind >= cur.contentIndent || inFence) {
         for (let b = j; b < k; b++) cur.lines.push('');
@@ -805,8 +805,9 @@ function parseList(lines, i, defs) {
     }
     const ind = leadCols(l);
     if (inFence) {
-      cur.lines.push(ind >= cur.contentIndent ? dedentLine(l, cur.contentIndent, 0) : l);
-      if (isFenceClose(l, inFence.ch, inFence.len)) inFence = null;
+      const content = ind >= cur.contentIndent ? dedentLine(l, cur.contentIndent, 0) : l;
+      cur.lines.push(content);
+      if (isFenceClose(content, inFence.ch, inFence.len)) inFence = null;
       pendingBlanks = 0;
       j++; continue;
     }
@@ -824,7 +825,7 @@ function parseList(lines, i, defs) {
       finishItem(true);
       continue; // reprocess line as new item
     }
-    if (ind <= 3 && mk) break; // a different list marker ends this list
+    if (mk && mk.ind - first.ind <= 3) break; // a different list marker ends this list
     // lazy continuation: glue onto the previous content line
     if (pendingBlanks === 0 && cur.lines.length && !isBlank(cur.lines[cur.lines.length - 1]) && !startsInterruptBlock(lines, j, defs)) {
       const t = leadCols(l) >= 4 ? consumeCols(l, 4) : l;
