@@ -172,6 +172,40 @@ function labelHasLink(src, st) {
 }
 
 // Structural link parse: returns {label, href, title, end} or null.
+// When a label fails the span-aware scan because a completed code span is
+// followed by an unclosed backtick run before the ], and a valid inline
+// destination follows, marked emits the label with emphasis disabled.
+function failedLabel(src, bracket, st) {
+  if (scanBracket(src, bracket) >= 0) return null;
+  let depth = 0, i = bracket, inSpan = false, spansClosed = 0, close = -1;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '`') {
+      let n = 0; while (src[i + n] === '`') n++;
+      if (inSpan) spansClosed++;
+      inSpan = !inSpan;
+      i += n; continue;
+    }
+    if (!inSpan && c === '<') {
+      const am = SCHEME_AUTOLINK_RE.exec(src.slice(i, i + 300)) || EMAIL_AUTOLINK_RE.exec(src.slice(i));
+      if (am) { i += am[0].length; continue; }
+      const tm = TAG_RE.exec(src.slice(i));
+      if (tm) { i += tm[0].length; continue; }
+      i++; continue;
+    }
+    if (!inSpan && c === '[') depth++;
+    else if (c === ']') {
+      if (inSpan) { if (depth === 1 && spansClosed >= 1) { close = i; break; } }
+      else { depth--; if (depth === 0) break; }
+    }
+    i++;
+  }
+  if (close < 0 || src[close + 1] !== '(') return null;
+  if (!parseLinkDest(src, close + 1)) return null;
+  return { label: src.slice(bracket + 1, close), end: close + 1 };
+}
+
 function tryLinkParse(src, bracket, st, isImage) {
   const close = scanBracket(src, bracket);
   if (close < 0) return null;
@@ -315,6 +349,8 @@ function parseInline(src, st) {
       } else {
         const r = tryLink(src, i + 1, st, true);
         if (r) { pushHtml(r.html); i = r.end; continue; }
+        const f = failedLabel(src, i + 1, st);
+        if (f) { pushHtml('![' + parseInline(f.label, { defs: st.defs, inLink: true, doc: st.doc, noEm: true }) + ']'); i = f.end; continue; }
       }
       txt += '!'; i++; continue;
     }
@@ -326,12 +362,15 @@ function parseInline(src, st) {
         } else {
           const r = tryLink(src, i, st, false);
           if (r) { pushHtml(r.html); i = r.end; continue; }
+          const f = failedLabel(src, i, st);
+          if (f) { pushHtml('[' + parseInline(f.label, { defs: st.defs, inLink: true, doc: st.doc, noEm: true }) + ']'); i = f.end; continue; }
         }
       }
       txt += '['; i++; continue;
     }
     if (c === '*' || c === '_' || c === '~') {
       let run = 0; while (src[i + run] === c) run++;
+      if (st.noEm) { txt += src.slice(i, i + run); i += run; continue; }
       if (c === '~' && run > 2) { txt += '~'.repeat(run); i += run; continue; }
       flush();
       const prev = i > 0 ? src[i - 1] : undefined;
