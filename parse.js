@@ -579,12 +579,6 @@ function parseBlocks(src, refs) {
   for (let li = 0; li < lines.length; li++) {
     let rest = lines[li];
     let absCol = 0;
-    if (pendingHtml) {
-      // a terminator-closed html block loses its trailing newline only
-      // when a truly empty line follows it
-      if (rest === '') pendingHtml.termEnd = false;
-      pendingHtml = null;
-    }
 
     // ---- phase 1: match open containers ----
     let idx = 1;
@@ -631,6 +625,15 @@ function parseBlocks(src, refs) {
       // list and doc consume nothing
     }
     const matchedDepth = idx; // first unmatched index (== stack.length if all)
+
+    if (pendingHtml) {
+      // a terminator-closed html block loses its trailing newline only
+      // when a truly empty line follows it: the line's content once the
+      // open containers are stripped must be empty (a line of spaces,
+      // or one that still carries content, keeps the newline)
+      if (rest === '') pendingHtml.termEnd = false;
+      pendingHtml = null;
+    }
 
     if (!matchedAll) {
       // sibling list item? check if stack[matchedDepth-1] chain top after
