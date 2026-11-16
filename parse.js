@@ -3,7 +3,7 @@
 
 const PUNCT = new Set('!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~');
 function isWs(ch) { return ch === undefined || ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v' || ch === ' ' || ch === ' ' || (ch >= ' ' && ch <= ' ') || ch === ' ' || ch === ' ' || ch === ' ' || ch === ' ' || ch === '　' || ch === '﻿'; }
-const PUNCT_RE = /^\p{P}$/u;
+const PUNCT_RE = /^[\p{P}\p{S}]$/u;
 function isPunct(ch) { return ch !== undefined && PUNCT_RE.test(ch); }
 
 function escText(s) {
@@ -28,7 +28,7 @@ function unescapeStr(s) {
   return s.replace(/\\([!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~])/g, '$1');
 }
 function normLabel(s) {
-  return unescapeStr(s).trim().replace(/\s+/g, ' ').toLowerCase();
+  return s.trim().replace(/\s+/g, ' ').toLowerCase().replace(/ß/g, 'ss');
 }
 
 // ---------------- inline ----------------
@@ -50,6 +50,13 @@ function scanBracket(src, start) {
       const close = findCodeClose(src, i + n, n);
       if (close >= 0) { i = close + n; continue; }
       i += n; continue;
+    }
+    if (c === '<') {
+      const am = SCHEME_AUTOLINK_RE.exec(src.slice(i, i + 300)) || EMAIL_AUTOLINK_RE.exec(src.slice(i));
+      if (am) { i += am[0].length; continue; }
+      const tm = TAG_RE.exec(src.slice(i));
+      if (tm) { i += tm[0].length; continue; }
+      i++; continue;
     }
     if (c === '[') depth++;
     else if (c === ']') { depth--; if (depth === 0) return i; }
@@ -132,8 +139,37 @@ function parseLinkDest(src, pos) {
   return { href, title, end: i + 1 };
 }
 
-// Try to parse a link or image whose '[' is at src[bracket]. isImage: '![' with bracket at the '['.
-function tryLink(src, bracket, st, isImage) {
+// Does this link label contain a construct that would itself form a link?
+function labelHasLink(src, st) {
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (c === '\\') { i += 2; continue; }
+    if (c === '`') {
+      let run = 0; while (src[i + run] === '`') run++;
+      const close = findCodeClose(src, i + run, run);
+      if (close >= 0) { i = close + run; continue; }
+      i += run; continue;
+    }
+    if (c === '!' && src[i + 1] === '[') {
+      const close = scanBracket(src, i + 1);
+      if (close < 0) return false;
+      i = close + 1;
+      if (src[i] === '(') { const d = parseLinkDest(src, i); if (d) i = d.end; }
+      else if (src[i] === '[') { const rc = scanBracket(src, i); if (rc >= 0) i = rc + 1; }
+      continue;
+    }
+    if (c === '[') {
+      if (linkFormsAt(src, i, st)) return true;
+      i++; continue;
+    }
+    i++;
+  }
+  return false;
+}
+
+// Structural link parse: returns {label, href, title, end} or null.
+function tryLinkParse(src, bracket, st, isImage) {
   const close = scanBracket(src, bracket);
   if (close < 0) return null;
   const label = src.slice(bracket + 1, close);
@@ -157,12 +193,18 @@ function tryLink(src, bracket, st, isImage) {
     if (def) { href = def.href; title = def.title; end = after; }
   }
   if (end < 0) return null;
+  if (!isImage && labelHasLink(label, st)) return null;
+  return { label, href, title, end };
+}
+function tryLink(src, bracket, st, isImage) {
+  const r = tryLinkParse(src, bracket, st, isImage);
+  if (!r) return null;
   if (isImage) {
-    const alt = plainText(label, st);
-    return { html: `<img src="${encodeHref(href)}" alt="${escAttrNE(alt)}"${title !== null ? ` title="${escAttrNE(title)}"` : ''}>`, end };
+    const alt = plainText(r.label, st);
+    return { html: `<img src="${encodeHref(r.href)}" alt="${escAttrNE(alt)}"${r.title !== null ? ` title="${escAttrNE(r.title)}"` : ''}>`, end: r.end };
   }
-  const inner = parseInline(label, { defs: st.defs, inLink: true, inA: st.inA });
-  return { html: `<a href="${encodeHref(href)}"${title !== null ? ` title="${escAttrNE(title)}"` : ''}>${inner}</a>`, end };
+  const inner = parseInline(r.label, { defs: st.defs, inLink: true, inA: st.inA });
+  return { html: `<a href="${encodeHref(r.href)}"${r.title !== null ? ` title="${escAttrNE(r.title)}"` : ''}>${inner}</a>`, end: r.end };
 }
 
 function trimAutolink(s) {
@@ -202,6 +244,7 @@ function linkFormsAt(src, idx, st) {
 
 function parseInline(src, st) {
   const atoms = [];
+  const et = st.plain ? (x) => x : escText;
   let txt = '';
   const flush = () => { if (txt) { atoms.push({ k: 'h', s: txt }); txt = ''; } };
   const pushHtml = (s) => { flush(); atoms.push({ k: 'h', s }); };
@@ -211,8 +254,8 @@ function parseInline(src, st) {
     const c = src[i];
     if (c === '\\') {
       const d = src[i + 1];
-      if (d === '\n') { pushHtml('<br>'); i += 2; continue; }
-      if (d !== undefined && PUNCT.has(d)) { txt += escText(d); i += 2; continue; }
+      if (d === '\n') { pushHtml(st.plain ? '\n' : '<br>'); i += 2; continue; }
+      if (d !== undefined && PUNCT.has(d)) { txt += et(d); i += 2; continue; }
       txt += '\\'; i++; continue;
     }
     if (c === '`') {
@@ -221,7 +264,7 @@ function parseInline(src, st) {
       if (close >= 0) {
         let content = src.slice(i + run, close).replace(/\n/g, ' ');
         if (content.length >= 2 && content[0] === ' ' && content[content.length - 1] === ' ' && /[^ ]/.test(content)) content = content.slice(1, -1);
-        pushHtml('<code>' + escCode(content) + '</code>');
+        pushHtml(st.plain ? content : '<code>' + escCode(content) + '</code>');
         i = close + run; continue;
       }
       txt += '`'.repeat(run); i += run; continue;
@@ -229,9 +272,9 @@ function parseInline(src, st) {
     if (c === '&') {
       const rest = src.slice(i, i + 40);
       let m = /^&#(\d{1,7});/.exec(rest);
-      if (m) { txt += escText(decodeNumRef(parseInt(m[1], 10))); i += m[0].length; continue; }
+      if (m) { txt += et(decodeNumRef(parseInt(m[1], 10))); i += m[0].length; continue; }
       m = /^&#[Xx]([0-9a-fA-F]{1,6});/.exec(rest);
-      if (m) { txt += escText(decodeNumRef(parseInt(m[1], 16))); i += m[0].length; continue; }
+      if (m) { txt += et(decodeNumRef(parseInt(m[1], 16))); i += m[0].length; continue; }
       m = /^&[a-zA-Z][a-zA-Z0-9]*;/.exec(rest);
       if (m) { txt += m[0]; i += m[0].length; continue; }
       txt += '&amp;'; i++; continue;
@@ -239,14 +282,14 @@ function parseInline(src, st) {
     if (c === '<') {
       if (!st.inLink || true) {
         let m = SCHEME_AUTOLINK_RE.exec(src.slice(i, i + 300));
-        if (m) { pushHtml(`<a href="${encodeHref(m[1])}">${escText(m[1])}</a>`); i += m[0].length; continue; }
+        if (m) { pushHtml(st.plain ? m[1] : `<a href="${encodeHref(m[1])}">${escText(m[1])}</a>`); i += m[0].length; continue; }
         m = EMAIL_AUTOLINK_RE.exec(src.slice(i));
-        if (m) { pushHtml(`<a href="mailto:${encodeHref(m[1])}">${escText(m[1])}</a>`); i += m[0].length; continue; }
+        if (m) { pushHtml(st.plain ? m[1] : `<a href="mailto:${encodeHref(m[1])}">${escText(m[1])}</a>`); i += m[0].length; continue; }
       }
       const tm = TAG_RE.exec(src.slice(i));
       if (tm) {
         const raw = tm[0];
-        pushHtml(raw);
+        if (!st.plain) pushHtml(raw); else flush();
         const name = (tm[1] || (tm[2] ? tm[2].slice(1) : '') || '').toLowerCase();
         if (tm[1] && name === 'a' && !raw.endsWith('/>')) st.inA = true;
         if (tm[2] && name === 'a') st.inA = false;
@@ -255,14 +298,24 @@ function parseInline(src, st) {
       txt += '&lt;'; i++; continue;
     }
     if (c === '!' && src[i + 1] === '[') {
-      const r = tryLink(src, i + 1, st, true);
-      if (r) { pushHtml(r.html); i = r.end; continue; }
+      if (st.plain) {
+        const r = tryLinkParse(src, i + 1, st, true);
+        if (r) { pushHtml(plainText(r.label, st)); i = r.end; continue; }
+      } else {
+        const r = tryLink(src, i + 1, st, true);
+        if (r) { pushHtml(r.html); i = r.end; continue; }
+      }
       txt += '!'; i++; continue;
     }
     if (c === '[') {
       if (!st.inLink) {
-        const r = tryLink(src, i, st, false);
-        if (r) { pushHtml(r.html); i = r.end; continue; }
+        if (st.plain) {
+          const r = tryLinkParse(src, i, st, false);
+          if (r) { pushHtml(plainText(r.label, st)); i = r.end; continue; }
+        } else {
+          const r = tryLink(src, i, st, false);
+          if (r) { pushHtml(r.html); i = r.end; continue; }
+        }
       }
       txt += '['; i++; continue;
     }
@@ -283,7 +336,7 @@ function parseInline(src, st) {
       } else {
         canOpen = leftFlank; canClose = rightFlank;
       }
-      atoms.push({ k: 'd', ch: c, len: run, canOpen, canClose });
+      atoms.push({ k: 'd', ch: c, len: run, olen: run, canOpen, canClose });
       i += run; continue;
     }
     if (!st.inLink && !st.inA && (c === 'w' || c === 'h' || c === 'm' || c === 'x' || /[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]/.test(c))) {
@@ -314,7 +367,7 @@ function parseInline(src, st) {
             text = cand; href = 'mailto:' + cand;
           }
         }
-        if (text) { pushHtml(`<a href="${encodeHref(href)}">${escText(text)}</a>`); i += text.length; continue; }
+        if (text) { pushHtml(st.plain ? text : `<a href="${encodeHref(href)}">${escText(text)}</a>`); i += text.length; continue; }
       }
     }
     if (c === '\n') {
@@ -322,7 +375,7 @@ function parseInline(src, st) {
       let sp = 0; while (src[i - 1 - sp] === ' ') sp++;
       if (sp >= 2) {
         txt = txt.replace(/ +$/, '');
-        pushHtml('<br>');
+        pushHtml(st.plain ? '\n' : '<br>');
         i++; continue;
       }
       txt += '\n'; i++; continue;
@@ -333,6 +386,7 @@ function parseInline(src, st) {
     txt += c; i++;
   }
   flush();
+  atoms.plainMode = !!st.plain;
   processDelims(atoms);
   let out = '';
   for (const a of atoms) {
@@ -348,89 +402,37 @@ function processDelims(atoms) {
   while (ci < atoms.length) {
     const closer = atoms[ci];
     if (closer.k !== 'd' || !closer.canClose || closer.len === 0) { ci++; continue; }
-    let oi = ci - 1, opener = null;
-    while (oi >= 0) {
-      const a = atoms[oi];
-      if (a.k === 'd' && a.ch === closer.ch && a.canOpen && a.len > 0) { opener = a; break; }
-      oi--;
+    // search backwards for a matching opener; rule-of-3 failures keep searching
+    let opener = null, oi = -1;
+    for (let j = ci - 1; j >= 0; j--) {
+      const a = atoms[j];
+      if (a.k !== 'd' || a.ch !== closer.ch || !a.canOpen || a.len === 0) continue;
+      if ((closer.canOpen || a.canClose) && (a.olen + closer.olen) % 3 === 0 && (a.olen % 3 !== 0 || closer.olen % 3 !== 0)) continue;
+      opener = a; oi = j; break;
     }
     if (!opener) { ci++; continue; }
-    // rule of 3
-    if ((closer.canOpen || opener.canClose) && (opener.len + closer.len) % 3 === 0 && (opener.len % 3 !== 0 || closer.len % 3 !== 0)) { ci++; continue; }
-    const use = (closer.ch === '~') ? (opener.len >= 2 && closer.len >= 2 ? 2 : 1)
-      : (opener.len >= 2 && closer.len >= 2 ? 2 : 1);
+    const use = (opener.len >= 2 && closer.len >= 2) ? 2 : 1;
     opener.len -= use; closer.len -= use;
     const tag = closer.ch === '~' ? 'del' : (use === 2 ? 'strong' : 'em');
-    atoms.splice(ci, 0, { k: 'h', s: `</${tag}>` });
-    atoms.splice(oi + 1, 0, { k: 'h', s: `<${tag}>` });
-    // remove delimiters strictly between the inserted tags
+    const plainMode = atoms.plainMode;
+    atoms.splice(ci, 0, { k: 'h', s: plainMode ? '' : `</${tag}>` });
+    atoms.splice(oi + 1, 0, { k: 'h', s: plainMode ? '' : `<${tag}>` });
+    // delimiters between the pair can no longer match: they become literal text
     for (let j = ci; j >= oi + 2; j--) {
-      if (atoms[j].k === 'd') atoms.splice(j, 1);
+      if (atoms[j].k === 'd') atoms[j] = { k: 'h', s: atoms[j].ch.repeat(atoms[j].len) };
     }
-    // adjust ci: closer shifted by +1 (open tag) - removed count; recompute by identity
     ci = atoms.indexOf(closer);
     if (closer.len === 0) ci++;
   }
-  // leftover delimiters become literal text
   for (let j = 0; j < atoms.length; j++) {
     const a = atoms[j];
-    if (a.k === 'd') { atoms[j] = { k: 'h', s: a.ch.repeat(a.len) }; }
+    if (a.k === 'd') atoms[j] = { k: 'h', s: a.ch.repeat(a.len) };
   }
 }
 
 // Plain-text rendering of inline source (for image alt text).
 function plainText(src, st) {
-  let out = '';
-  let i = 0;
-  const n = src.length;
-  while (i < n) {
-    const c = src[i];
-    if (c === '\\') {
-      const d = src[i + 1];
-      if (d !== undefined && PUNCT.has(d)) { out += d; i += 2; continue; }
-      if (d === '\n') { out += '\n'; i += 2; continue; }
-      out += '\\'; i++; continue;
-    }
-    if (c === '`') {
-      let run = 0; while (src[i + run] === '`') run++;
-      const close = findCodeClose(src, i + run, run);
-      if (close >= 0) {
-        let content = src.slice(i + run, close).replace(/\n/g, ' ');
-        if (content.length >= 2 && content[0] === ' ' && content[content.length - 1] === ' ' && /[^ ]/.test(content)) content = content.slice(1, -1);
-        out += content; i = close + run; continue;
-      }
-      out += '`'.repeat(run); i += run; continue;
-    }
-    if (c === '&') {
-      const rest = src.slice(i, i + 40);
-      let m = /^&#(\d{1,7});/.exec(rest);
-      if (m) { out += decodeNumRef(parseInt(m[1], 10)); i += m[0].length; continue; }
-      m = /^&#[Xx]([0-9a-fA-F]{1,6});/.exec(rest);
-      if (m) { out += decodeNumRef(parseInt(m[1], 16)); i += m[0].length; continue; }
-      m = /^&[a-zA-Z][a-zA-Z0-9]*;/.exec(rest);
-      if (m) { out += m[0]; i += m[0].length; continue; }
-      out += '&'; i++; continue;
-    }
-    if (c === '<') {
-      const tm = TAG_RE.exec(src.slice(i));
-      if (tm) { i += tm[0].length; continue; }
-      const am = SCHEME_AUTOLINK_RE.exec(src.slice(i, i + 300)) || EMAIL_AUTOLINK_RE.exec(src.slice(i));
-      if (am) { out += am[1]; i += am[0].length; continue; }
-      out += '<'; i++; continue;
-    }
-    if (c === '!' && src[i + 1] === '[') {
-      const close = scanBracket(src, i + 1);
-      if (close >= 0) { out += plainText(src.slice(i + 2, close), st); i = close + 1; continue; }
-      out += '!'; i++; continue;
-    }
-    if (c === '[') {
-      const close = scanBracket(src, i);
-      if (close >= 0) { out += plainText(src.slice(i + 1, close), st); i = close + 1; continue; }
-      out += '['; i++; continue;
-    }
-    out += c; i++;
-  }
-  return out;
+  return parseInline(src, { defs: st.defs, inLink: false, inA: false, plain: true });
 }
 
 // ---------------- block ----------------
@@ -608,6 +610,8 @@ function tryDef(lines, i, defs) {
   if (close < 0) return null;
   const label = text.slice(p + 1, close);
   if (/\n[ \t]*\n/.test(label)) return null;
+  { let bad = false; for (let k = 0; k < label.length; k++) { if (label[k] === '\\') k++; else if (label[k] === '[' || label[k] === ']') { bad = true; break; } } if (bad) return null; }
+  if (normLabel(label) === '') return null;
   p = close + 1;
   if (text[p] !== ':') return null;
   p++;
